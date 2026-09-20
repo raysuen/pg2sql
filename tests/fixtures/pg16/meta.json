@@ -1,0 +1,456 @@
+{
+    "tables": [
+        {
+            "table": "t_arr",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "id",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "arr",
+                    "attnum": 2,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 1007,
+                    "attstorage": "x"
+                },
+                {
+                    "len": -1,
+                    "name": "txt",
+                    "attnum": 3,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 1009,
+                    "attstorage": "x"
+                }
+            ],
+            "toastrelid": "16401",
+            "primary_key": null,
+            "relfilenode": "16398"
+        },
+        {
+            "table": "t_drop",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "id",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": 4,
+                    "name": "a",
+                    "attnum": 2,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": 4,
+                    "name": "........pg.dropped.3........",
+                    "attnum": 3,
+                    "typmod": -1,
+                    "dropped": true,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 0,
+                    "attstorage": "p"
+                },
+                {
+                    "len": 4,
+                    "name": "c",
+                    "attnum": 4,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                }
+            ],
+            "toastrelid": "0",
+            "primary_key": null,
+            "relfilenode": "16395"
+        },
+        {
+            "table": "t_j",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "id",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "j",
+                    "attnum": 2,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 3802,
+                    "attstorage": "x"
+                }
+            ],
+            "toastrelid": "16416",
+            "primary_key": null,
+            "relfilenode": "16413"
+        },
+        {
+            "table": "t_jn",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "id",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "j",
+                    "attnum": 2,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 3802,
+                    "attstorage": "x"
+                }
+            ],
+            "toastrelid": "16426",
+            "primary_key": null,
+            "relfilenode": "16423"
+        },
+        {
+            "table": "t_json",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "id",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "j",
+                    "attnum": 2,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 3802,
+                    "attstorage": "x"
+                },
+                {
+                    "len": -1,
+                    "name": "t",
+                    "attnum": 3,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 25,
+                    "attstorage": "x"
+                }
+            ],
+            "toastrelid": "16393",
+            "primary_key": null,
+            "relfilenode": "16390"
+        },
+        {
+            "table": "t_n",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "id",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "n",
+                    "attnum": 2,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 1700,
+                    "attstorage": "m"
+                }
+            ],
+            "toastrelid": "16421",
+            "primary_key": null,
+            "relfilenode": "16418"
+        },
+        {
+            "table": "t_name",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "id",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "name",
+                    "attnum": 2,
+                    "typmod": 24,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 1043,
+                    "attstorage": "x"
+                },
+                {
+                    "len": 4,
+                    "name": "num",
+                    "attnum": 3,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": 8,
+                    "name": "ts",
+                    "attnum": 4,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "d",
+                    "attbyval": true,
+                    "type_oid": 1184,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "amt",
+                    "attnum": 5,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 1700,
+                    "attstorage": "m"
+                }
+            ],
+            "toastrelid": "16388",
+            "primary_key": null,
+            "relfilenode": "16385"
+        },
+        {
+            "table": "t_nn",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "id",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": true,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "nm",
+                    "attnum": 2,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 25,
+                    "attstorage": "x"
+                }
+            ],
+            "toastrelid": "16406",
+            "primary_key": null,
+            "relfilenode": "16403"
+        },
+        {
+            "table": "t_null",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "a",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "b",
+                    "attnum": 2,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 25,
+                    "attstorage": "x"
+                },
+                {
+                    "len": 4,
+                    "name": "c",
+                    "attnum": 3,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "d",
+                    "attnum": 4,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 25,
+                    "attstorage": "x"
+                }
+            ],
+            "toastrelid": "16411",
+            "primary_key": null,
+            "relfilenode": "16408"
+        },
+        {
+            "table": "tnum",
+            "schema": "public",
+            "columns": [
+                {
+                    "len": 4,
+                    "name": "id",
+                    "attnum": 1,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": true,
+                    "type_oid": 23,
+                    "attstorage": "p"
+                },
+                {
+                    "len": -1,
+                    "name": "n",
+                    "attnum": 2,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 1700,
+                    "attstorage": "m"
+                },
+                {
+                    "len": -1,
+                    "name": "j",
+                    "attnum": 3,
+                    "typmod": -1,
+                    "dropped": false,
+                    "notnull": false,
+                    "attalign": "i",
+                    "attbyval": false,
+                    "type_oid": 3802,
+                    "attstorage": "x"
+                }
+            ],
+            "toastrelid": "16480",
+            "primary_key": null,
+            "relfilenode": "16477"
+        }
+    ],
+    "database": "tdb",
+    "pg_version": 160004
+}
