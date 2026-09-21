@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# version: 1.16
+# version: 1.18
 """
 pg2sql - 离线解析 PostgreSQL 堆数据文件并导出为 SQL
 用法: python3 main.py <data_file> [options]
@@ -23,7 +23,8 @@ from pg2sql.heapfile import HeapFile, _extract_fields_direct
 from pg2sql.catalog import (
     load_meta_json, parse_catalog_offline,
     auto_discover_meta, auto_discover_all_tables,
-    export_meta_to_json, is_kingbase_datadir,
+    export_meta_to_json, is_kingbase_datadir, detect_pg_version,
+    load_enum_map,
     TableMeta, Column,
 )
 from pg2sql.toast import ToastFile
@@ -213,6 +214,7 @@ def load_metadata(args) -> dict:
         base = os.path.join(args.datadir, "base", str(args.db_oid))
         if not os.path.isdir(base):
             error_exit(f"数据库目录不存在: {base}")
+        load_enum_map(base, detect_pg_version(args.datadir) or 0)
         meta = auto_discover_all_tables(base, page_size=args.page_size)
         if args.verbose:
             log(f"从数据目录自动发现元数据: {len(meta['tables'])} 个表")
@@ -223,6 +225,8 @@ def load_metadata(args) -> dict:
         data_file = os.path.abspath(args.datafile)
         if os.path.isfile(data_file):
             try:
+                load_enum_map(os.path.dirname(data_file), detect_pg_version(
+                    os.path.dirname(os.path.dirname(data_file))) or 0)
                 meta = auto_discover_meta(data_file, page_size=args.page_size)
                 if args.verbose:
                     tm = list(meta["tables"].values())[0]
@@ -236,6 +240,8 @@ def load_metadata(args) -> dict:
                 error_exit(f"无法自动发现表结构: {e}\n请使用 --catalog-json 提供元数据, 或确保数据文件同目录下有 pg_class(1259) 和 pg_attribute(1249)")
         elif os.path.isdir(data_file):
             # datafile 是数据库目录 (如 base/16384/)
+            load_enum_map(data_file, detect_pg_version(
+                os.path.dirname(os.path.dirname(data_file))) or 0)
             meta = auto_discover_all_tables(data_file, page_size=args.page_size)
             if args.verbose:
                 log(f"从数据库目录自动发现元数据: {len(meta['tables'])} 个表")
@@ -817,7 +823,12 @@ def run_parallel(args, meta, table_meta):
                     col = table_meta.columns[i]
                     # 数字类型不加引号（xid/cid 除外：PG 无 int→xid 隐式转换，需文本输入）
                     if col.atttypid in (16, 20, 21, 23, 26, 700, 701, 1700):
-                        sql_vals.append(str(v))
+                        sv = str(v)
+                        # float 特殊值（NaN/±Infinity）PG 需要文本字面量，裸标识符非法
+                        if sv in ("NaN", "Infinity", "-Infinity"):
+                            sql_vals.append(sql_string_literal(sv))
+                        else:
+                            sql_vals.append(sv)
                     else:
                         sql_vals.append(sql_string_literal(str(v)))
             stmt = f"{verb} {target} {col_str} VALUES ({', '.join(sql_vals)});\n"

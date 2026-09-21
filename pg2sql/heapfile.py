@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 1.7
+# version: 1.8
 """
 pg2sql.heapfile
 堆文件读取与导出引擎：遍历页面、提取元组、关联 TOAST、坏页容错。
@@ -582,6 +582,10 @@ class HeapFile:
             1700,  # numeric
         }  # 注: xid(28)/cid(29) 走文本输入，PG 无 int→xid 隐式转换
         if col.atttypid in no_quote_oids:
+            # float 特殊值（NaN/±Infinity）PG 需要文本字面量，裸标识符非法
+            if value in ("NaN", "Infinity", "-Infinity"):
+                from .types import sql_string_literal
+                return sql_string_literal(value)
             return value
         # 其他用 E'' 安全字面量（转义控制字节，防止换行拆断 INSERT/psql 误判命令）
         from .types import sql_string_literal

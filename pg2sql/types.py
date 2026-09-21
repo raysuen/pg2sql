@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 1.6
+# version: 1.7
 """
 pg2sql.types
 PostgreSQL 内置类型解码。将字段原始字节解码为可打印/可导入的 SQL 文本值。
@@ -278,11 +278,21 @@ def decode_int8(b: bytes) -> str:
 
 def decode_float4(b: bytes) -> str:
     v = struct.unpack("<f", b[:4])[0]
-    return repr(v)
+    return _fmt_float(v)
 
 
 def decode_float8(b: bytes) -> str:
     v = struct.unpack("<d", b[:8])[0]
+    return _fmt_float(v)
+
+
+def _fmt_float(v: float) -> str:
+    """PG float 文本输出：NaN / Infinity / -Infinity（非 Python repr 小写）。"""
+    import math
+    if math.isnan(v):
+        return "NaN"
+    if math.isinf(v):
+        return "Infinity" if v > 0 else "-Infinity"
     return repr(v)
 
 
@@ -397,16 +407,34 @@ def decode_timetz(b: bytes) -> str:
 
 
 def decode_interval(b: bytes) -> str:
+    """PG interval 文本输出（对照 datetime.c EncodeInterval）。
+
+    磁盘：time 微秒 int64 + day int32 + month int32（可负）。
+    输出："1 year 2 mons 3 days 04:05:06.789"，全零 "00:00:00"。
+    """
     time_us = struct.unpack("<q", b[:8])[0]
     day = struct.unpack("<i", b[8:12])[0]
     month = struct.unpack("<i", b[12:16])[0]
+    year, month = divmod(month, 12)
     parts = []
+    if year:
+        parts.append(f"{year} year" if year == 1 else f"{year} years")
     if month:
-        parts.append(f"{month} mon")
+        parts.append(f"{month} mon" if month == 1 else f"{month} mons")
     if day:
-        parts.append(f"{day} day")
-    if time_us:
-        parts.append(f"{time_us / 1e6:g} sec")
+        parts.append(f"{day} day" if abs(day) == 1 else f"{day} days")
+    sign = "-" if time_us < 0 else ""
+    t = abs(time_us)
+    us = t % 1000000
+    total_s = t // 1000000
+    hh, rem = divmod(total_s, 3600)
+    mm, ss = divmod(rem, 60)
+    time_s = f"{sign}{hh:02d}:{mm:02d}:{ss:02d}"
+    if us:
+        time_s += f".{us:06d}".rstrip("0")
+    if time_us != 0:
+        # 仅时间非零时追加 HH:MM:SS；纯年月日（time=0）不追加 00:00:00（PG 行为）
+        parts.append(time_s)
     return " ".join(parts) if parts else "00:00:00"
 
 
@@ -1019,8 +1047,23 @@ def decode_value(oid: int, raw: bytes) -> str:
     """按 OID 解码字段值（raw 为已去 TOAST 的原始数据或原始二进制）。"""
     if raw is None:
         return "NULL"
+    # 枚举类型：磁盘存枚举成员 oid（int4），查 pg_enum 映射转标签
+    enum_map = ENUM_MAP.get(oid)
+    if enum_map is not None and len(raw) >= 4:
+        member_oid = struct.unpack("<I", raw[:4])[0]
+        return enum_map.get(member_oid, str(member_oid))
     dec = DECODERS.get(oid, decode_default)
     try:
         return dec(raw)
     except Exception:
         return decode_default(raw)
+
+
+# 枚举映射：{枚举类型 oid: {成员 oid: 标签}}，由 catalog.load_enum_map 注入
+ENUM_MAP: dict = {}
+
+
+def set_enum_map(m: dict) -> None:
+    """注入 pg_enum 映射（导出前调用；无枚举时传空 dict 清空）。"""
+    global ENUM_MAP
+    ENUM_MAP = dict(m)

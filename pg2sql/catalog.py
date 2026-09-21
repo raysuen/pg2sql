@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.0
+# version: 2.4
 """
 pg2sql.catalog
 表结构元数据管理。
@@ -40,6 +40,7 @@ PG_NAMESPACE_OID = 2615
 PG_CLASS_RELFILE = 1259
 PG_ATTRIBUTE_RELFILE = 1249
 PG_TYPE_RELFILE = 1247
+PG_ENUM_RELFILE = 3501  # pg_enum（各版本固定）
 
 # pg_attribute 常量
 ATTNUM_DROPPED = -1  # atttypmod<0 或 attnum<0 表示已删除列
@@ -124,6 +125,9 @@ _PG_NAMESPACE_COLS = [
     (4, False, "i"),   # nspowner
 ]
 
+# PG18+：relallvisible 后新增 relallfrozen(int4)，relkind 顺延为用户列 17
+_PG_CLASS_COLS_18 = _PG_CLASS_COLS_16[:11] + [(4, False, "i")] + _PG_CLASS_COLS_16[11:]
+
 # pg_database 用户列（datname 第一列）
 _PG_DATABASE_COLS = [
     (64, False, "c"),  # datname
@@ -162,7 +166,31 @@ def _pg_attribute_layout(version: int, is_kingbase: bool = False):
             (1, False, "c"), (2, False, "s"), (4, False, "i"),    # islocal inhcount collation
         ]
         return fixed + [(-1, True, "i")] * 4
-    if version >= 16:
+    if version >= 18:
+        # PG18: 删除 attcacheoff；atttypmod(int4) 移至 attnum 后、attndims(int2) 前；
+        #       attstattarget(int2) 在 attcollation 后（同 PG17 位置）
+        fixed = [
+            (4, False, "i"), (64, False, "c"), (4, False, "i"),   # relid name typid
+            (2, False, "s"), (2, False, "s"), (4, False, "i"),    # len num typmod
+            (2, False, "s"), (1, False, "c"), (1, False, "c"),    # ndims byval align
+            (1, False, "c"), (1, False, "c"), (1, False, "c"),    # storage compression notnull
+            (1, False, "c"), (1, False, "c"), (1, False, "c"),    # hasdef hasmissing identity
+            (1, False, "c"), (1, False, "c"), (1, False, "c"),    # generated isdropped islocal
+            (2, False, "s"), (4, False, "i"), (2, False, "s"),    # inhcount collation stattarg
+        ]
+    elif version == 17:
+        # PG17: attstattarget 移到 attcollation 之后（与 PG16 交换位置）
+        fixed = [
+            (4, False, "i"), (64, False, "c"), (4, False, "i"),   # relid name typid
+            (2, False, "s"), (2, False, "s"), (4, False, "i"),    # len num cacheoff
+            (4, False, "i"), (2, False, "s"), (1, False, "c"),    # typmod ndims byval
+            (1, False, "c"), (1, False, "c"), (1, False, "c"),    # align storage compression
+            (1, False, "c"), (1, False, "c"), (1, False, "c"),    # notnull hasdef hasmissing
+            (1, False, "c"), (1, False, "c"), (1, False, "c"),    # identity generated isdropped
+            (1, False, "c"), (2, False, "s"), (4, False, "i"),    # islocal inhcount collation
+            (2, False, "s"),                                      # stattarg
+        ]
+    elif version >= 16:
         fixed = [
             (4, False, "i"), (64, False, "c"), (4, False, "i"),   # relid name typid
             (2, False, "s"), (2, False, "s"), (4, False, "i"),    # len num cacheoff
@@ -181,7 +209,7 @@ def _pg_attribute_layout(version: int, is_kingbase: bool = False):
             (1, False, "c"), (1, False, "c"), (1, False, "c"),    # byval align storage
             (1, False, "c"), (1, False, "c"), (1, False, "c"),    # compression notnull hasdef
             (1, False, "c"), (1, False, "c"), (1, False, "c"),    # hasmissing identity generated
-            (1, False, "c"), (1, False, "c"), (2, False, "s"),    # isdropped islocal inhcount
+            (1, False, "c"), (1, False, "c"), (4, False, "i"),    # isdropped islocal inhcount(int4!)
             (4, False, "i"),                                      # collation
         ]
     elif version >= 12:
@@ -189,10 +217,10 @@ def _pg_attribute_layout(version: int, is_kingbase: bool = False):
             (4, False, "i"), (64, False, "c"), (4, False, "i"),   # relid name typid
             (4, False, "i"), (2, False, "s"), (2, False, "s"),    # stattarg len num
             (2, False, "s"), (4, False, "i"), (4, False, "i"),    # ndims cacheoff typmod
-            (1, False, "c"), (1, False, "c"), (1, False, "c"),    # byval align storage
+            (1, False, "c"), (1, False, "c"), (1, False, "c"),    # byval storage align（PG12/13 实测：storage 在 align 前）
             (1, False, "c"), (1, False, "c"), (1, False, "c"),    # notnull hasdef hasmissing
             (1, False, "c"), (1, False, "c"), (1, False, "c"),    # identity generated isdropped
-            (1, False, "c"), (2, False, "s"), (4, False, "i"),    # islocal inhcount collation
+            (1, False, "c"), (4, False, "i"), (4, False, "i"),    # islocal inhcount(int4!) collation
         ]
     else:
         # PG<=11（尽力而为：attstorage 在 attalign 前、无 attgenerated）
@@ -222,6 +250,16 @@ def _attr_idx(version: int, is_kingbase: bool = False):
                     attnum=5, attndims=6, attcacheoff=7, atttypmod=8, attbyval=9,
                     attstorage=10, attalign=11, attnotnull=12, attisdropped=16,
                     attcollation=19)
+    if version >= 18:
+        return dict(attrelid=0, attname=1, atttypid=2, attlen=3, attnum=4,
+                    atttypmod=5, attndims=6, attbyval=7, attalign=8,
+                    attstorage=9, attnotnull=11, attisdropped=16,
+                    attstattarget=20, attcollation=19)
+    if version == 17:
+        return dict(attrelid=0, attname=1, atttypid=2, attlen=3, attnum=4,
+                    attcacheoff=5, atttypmod=6, attndims=7, attbyval=8,
+                    attalign=9, attstorage=10, attnotnull=12, attisdropped=17,
+                    attstattarget=21, attcollation=20)
     if version >= 16:
         return dict(attrelid=0, attname=1, atttypid=2, attlen=3, attnum=4,
                     attcacheoff=5, atttypmod=6, attndims=7, attbyval=8,
@@ -235,7 +273,7 @@ def _attr_idx(version: int, is_kingbase: bool = False):
     if version >= 12:
         return dict(attrelid=0, attname=1, atttypid=2, attstattarget=3, attlen=4,
                     attnum=5, attndims=6, attcacheoff=7, atttypmod=8, attbyval=9,
-                    attalign=10, attstorage=11, attnotnull=12, attisdropped=17,
+                    attstorage=10, attalign=11, attnotnull=12, attisdropped=17,
                     attcollation=20)
     return dict(attrelid=0, attname=1, atttypid=2, attstattarget=3, attlen=4,
                 attnum=5, attndims=6, attcacheoff=7, atttypmod=8, attbyval=9,
@@ -323,11 +361,27 @@ def _attr_fields(tup: HeapTuple, version: int, is_kingbase: bool = False):
 def _class_fields(tup: HeapTuple, version: int):
     """提取 pg_class 元组 → (oid, relname, relnamespace, relfilenode, relkind) 或 None。
 
-    PG12+：布局 = [OID 4B] + 用户 16 列（relkind 在最后一列）。
+    PG18+：布局 = [OID 4B] + 用户 17 列（relallvisible 后新增 relallfrozen，
+            relkind 为用户列 17 / fields[17]）。
+    PG12-17：布局 = [OID 4B] + 用户 16 列（relkind 在最后一列 fields[16]）。
     PG<=11：OID 在 t_hoff-4，用户列从 t_hoff 起。
     """
     try:
-        if version >= 12:
+        if version >= 18:
+            layout = _with_oid(_PG_CLASS_COLS_18)
+            fields = tup.get_fields(layout)
+            # 至少需覆盖 oid..relfilenode（索引 0-7）
+            if not fields or len(fields) < 8:
+                return None
+            oid_f = fields[0]
+            if not oid_f or len(oid_f) < 4:
+                return None
+            oid = struct.unpack("<I", oid_f[:4])[0]
+            relname_f = fields[1]
+            relnamespace_f = fields[2]
+            relfilenode_f = fields[7]
+            relkind_f = fields[17] if len(fields) > 17 else None
+        elif version >= 12:
             layout = _with_oid(_PG_CLASS_COLS_16)
             fields = tup.get_fields(layout)
             # 至少需覆盖 oid..relfilenode（索引 0-7）；relkind 缺失时默认 'r'
@@ -462,7 +516,21 @@ class TableMeta:
         return base
 
     def generate_ddl(self) -> str:
-        """生成 CREATE TABLE 语句。"""
+        """生成 CREATE TABLE 语句（枚举列前置 CREATE TYPE 定义）。"""
+        from .types import ENUM_MAP
+        pre = ""
+        seen = set()
+        for c in self.columns:
+            if c.attdropped:
+                continue
+            m = ENUM_MAP.get(c.atttypid)
+            if m is None or c.atttypid in seen:
+                continue
+            seen.add(c.atttypid)
+            tname = self.col_type_sql(c)
+            labels = ", ".join(
+                "'%s'" % lab.replace("'", "''") for lab in m.values())
+            pre += f'CREATE TYPE "{tname}" AS ENUM ({labels});\n'
         cols = []
         for c in self.columns:
             if c.attdropped:
@@ -475,7 +543,8 @@ class TableMeta:
             pks = ", ".join(f'"{p}"' for p in self.primary_key)
             cols.append(f"  PRIMARY KEY ({pks})")
         return (
-            f'CREATE TABLE "{self.schema}"."{self.relname}" (\n'
+            pre
+            + f'CREATE TABLE "{self.schema}"."{self.relname}" (\n'
             + ",\n".join(cols)
             + "\n);"
         )
@@ -604,6 +673,38 @@ def _iter_tuples(path: str, pg_version: int = 12, is_kingbase: bool = False):
             if not tup.is_live:
                 continue
             yield pageno, item.index, tup
+
+
+def load_enum_map(db_dir: str, version: int = 0):
+    """读 base/{db}/3501（pg_enum）构建 {枚举类型 oid: {成员 oid: 标签}}，
+    注入 types.ENUM_MAP 供枚举列解码。文件缺失（如金仓无 pg_enum）时清空映射。
+
+    pg_enum 布局各版本一致（PG12-18）：
+      [OID 4B][enumtypid 4B][enumsortorder float4 4B][enumlabel name 64B]
+    """
+    from .types import set_enum_map
+    from .binary import cstring
+    path = os.path.join(db_dir, str(PG_ENUM_RELFILE))
+    if not os.path.isfile(path):
+        set_enum_map({})
+        return
+    # pg_enum 是含 oid 用户列的普通表：数据区布局即 [oid][enumtypid][enumsortorder][enumlabel]
+    # （勿套 _with_oid，否则 oid 重复、label 偏移错位）
+    layout = [(4, False, "i"), (4, False, "i"), (4, False, "f"), (64, False, "c")]
+    m = {}
+    try:
+        for _pn, _off, tup in _iter_tuples(path, version or 12, False):
+            f = tup.get_fields(layout)
+            if not f or len(f) < 4:
+                continue
+            enum_typid = struct.unpack("<I", f[1][:4])[0]
+            label = cstring(f[3])
+            if not label:
+                continue
+            m.setdefault(enum_typid, {})[struct.unpack("<I", f[0][:4])[0]] = label
+    except Exception:
+        pass
+    set_enum_map(m)
 
 
 def _db_oid_of(db_dir: str) -> int:
@@ -989,7 +1090,7 @@ def _auto_discover_meta_scan(db_dir, target_relfilenode, page_size):
     if not pg_class_path:
         raise FileNotFoundError(f"未在 {db_dir} 中找到 pg_class 文件")
 
-    class_entries = _scan_pg_class(pg_class_path, page_size)
+    class_entries = _scan_pg_class(pg_class_path, page_size, version=detect_pg_version(db_dir) or 0)
 
     target_oid = None
     target_relname = None
@@ -1120,7 +1221,7 @@ def _auto_discover_all_tables_scan(db_dir, page_size):
     pg_class_path = _detect_sys_file(db_dir, PG_CLASS_RELFILE, _KNOWN_PG_CLASS_NAMES, "pg_class", page_size)
     class_entries = []
     if pg_class_path:
-        class_entries = _scan_pg_class(pg_class_path, page_size)
+        class_entries = _scan_pg_class(pg_class_path, page_size, version=detect_pg_version(db_dir) or 0)
 
     # 一次性扫描 pg_attribute，按 attrelid 分组
     pg_attribute_path = os.path.join(db_dir, str(PG_ATTRIBUTE_RELFILE))
@@ -1175,8 +1276,11 @@ def _scan_data_region(path, page_size=8192):
     return results
 
 
-def _scan_pg_class(path, page_size=8192):
-    """数据区扫描 pg_class，返回 [(oid, relname, relnamespace, relfilenode, relkind), ...]"""
+def _scan_pg_class(path, page_size=8192, version=0):
+    """数据区扫描 pg_class，返回 [(oid, relname, relnamespace, relfilenode, relkind), ...]
+
+    version: PG 主版本（0=未知，用 PG12-17 偏移 115；>=18 用 119）。
+    """
     import struct as _s
     from .binary import cstring
 
@@ -1213,10 +1317,12 @@ def _scan_pg_class(path, page_size=8192):
             relns = _s.unpack_from("<I", raw, pos + 68)[0]
             # relfilenode (列7, offset 88)
             rfn = _s.unpack_from("<I", raw, pos + 88)[0]
-            # relkind (列14, offset 109)
+            # relkind 偏移：PG12-17 = 115（4B oid + 64B relname + 11*4B + 3B 布尔）；
+            # PG18+ = 119（relallvisible 后新增 relallfrozen int4）
+            rk_off = 119 if version >= 18 else 115
             relkind = "r"
-            if pos + 109 < pd_special:
-                relkind = chr(raw[pos + 109])
+            if pos + rk_off < pd_special:
+                relkind = chr(raw[pos + rk_off])
             results.append((oid, name_str, relns, rfn if rfn else oid, relkind))
             pos += 4
     return results
