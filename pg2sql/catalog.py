@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.6
+# version: 2.8
 """
 pg2sql.catalog
 表结构元数据管理。
@@ -23,7 +23,7 @@ import json
 import os
 import struct
 
-from .page import Page, PAGE_SIZE
+from .page import Page, PAGE_SIZE, detect_page_size
 from .tuple import HeapTuple
 from .types import (
     TYPE_NAMES, BPCHAROID, VARCHAROID, NUMERICOID, BITOID, VARBITOID,
@@ -639,16 +639,20 @@ def load_meta_json(path: str) -> dict:
 # --------------------------------------------------------------------------
 
 def _read_pages(path: str):
-    """按页切分文件，返回 [(pageno, raw)]"""
+    """按页切分文件，返回 [(pageno, raw)]（自动探测页大小，支持 16KB/32KB）"""
     out = []
     size = os.path.getsize(path)
+    if size == 0:
+        return out
     with open(path, "rb") as f:
+        ps = detect_page_size(f.read(130)) or PAGE_SIZE
+        f.seek(0)
         pageno = 0
         while True:
-            raw = f.read(PAGE_SIZE)
+            raw = f.read(ps)
             if not raw:
                 break
-            if len(raw) < PAGE_SIZE:
+            if len(raw) < ps:
                 break
             out.append((pageno, raw))
             pageno += 1
@@ -903,7 +907,7 @@ def _detect_sys_file(directory, standard_oid, known_names, label, page_size=8192
                     raw = f.read(page_size)
                     if len(raw) < page_size:
                         break
-                    page = Page(0, raw)
+                    page = Page(0, raw, page_size=page_size)
                     if not page.has_valid_layout:
                         continue
                     for item in page.items:
@@ -957,7 +961,7 @@ def _detect_pg_attribute(directory, standard_oid, target_oid, page_size=8192):
                 raw = f.read(page_size)
                 if len(raw) < page_size:
                     continue
-                page = Page(0, raw)
+                page = Page(0, raw, page_size=page_size)
                 if not page.has_valid_layout:
                     continue
                 count = 0
@@ -989,10 +993,36 @@ def _detect_pg_attribute(directory, standard_oid, target_oid, page_size=8192):
     return None
 
 
-def auto_discover_meta(data_file_path: str, page_size: int = 8192) -> dict:
+def _probe_page_size(path: str) -> int:
+    """从文件页头探测页大小；失败回退 8192。"""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(130)
+        ps = detect_page_size(raw)
+        if ps is not None:
+            return ps
+        size = os.path.getsize(path)
+        return size if 0 < size <= 32768 else PAGE_SIZE
+    except OSError:
+        return PAGE_SIZE
+
+
+def _probe_dir_page_size(db_dir: str) -> int:
+    """从数据库目录内系统目录文件探测页大小；失败回退 8192。"""
+    for oid in (1259, 1249, 1247):
+        p = os.path.join(db_dir, str(oid))
+        if os.path.isfile(p):
+            ps = _probe_page_size(p)
+            if ps is not None:
+                return ps
+    return PAGE_SIZE
+
+
+def auto_discover_meta(data_file_path: str, page_size=None) -> dict:
     """从数据文件路径自动发现表结构。
 
     两阶段: 先用标准 ItemId 解析，失败则回退到数据区扫描。
+    page_size=None 时自动探测（页头 pd_pagesize_version 编码）。
     """
     data_file_path = os.path.abspath(data_file_path)
     filename = os.path.basename(data_file_path)
@@ -1002,6 +1032,9 @@ def auto_discover_meta(data_file_path: str, page_size: int = 8192) -> dict:
         raise ValueError(f"数据文件名不是数字 OID: {filename}")
 
     target_relfilenode = int(filename)
+
+    if page_size is None:
+        page_size = _probe_page_size(data_file_path)
 
     # ===== 阶段 1: 标准 ItemId 解析 =====
     try:
@@ -1140,9 +1173,15 @@ def _auto_discover_meta_scan(db_dir, target_relfilenode, page_size):
     return {"database": tm.dbname, "tables": {tm.full_name: tm, str(tm.relfilenode): tm}}
 
 
-def auto_discover_all_tables(db_dir: str, page_size: int = 8192) -> dict:
-    """从数据库目录自动发现所有用户表的元数据。两阶段: 标准 ItemId → 数据区扫描。"""
+def auto_discover_all_tables(db_dir: str, page_size=None) -> dict:
+    """从数据库目录自动发现所有用户表的元数据。两阶段: 标准 ItemId → 数据区扫描。
+
+    page_size=None 时自动探测（从目录内系统目录文件页头编码）。
+    """
     db_dir = os.path.abspath(db_dir)
+
+    if page_size is None:
+        page_size = _probe_dir_page_size(db_dir)
 
     # ===== 阶段 1: 标准 ItemId 解析 =====
     try:
@@ -1270,7 +1309,7 @@ def _scan_data_region(path, page_size=8192):
             raw = f.read(page_size)
             if len(raw) < page_size:
                 break
-            page = Page(pageno, raw)
+            page = Page(pageno, raw, page_size=page_size)
             if not page.has_valid_layout:
                 continue
             pd_upper = page.header.get("upper", 0)
@@ -1509,10 +1548,11 @@ def _scan_pg_attribute_all(path, page_size=8192):
 
     return result
 
-def export_meta_to_json(db_dir: str, page_size: int = 8192) -> dict:
+def export_meta_to_json(db_dir: str, page_size=None) -> dict:
     """从数据库目录离线解析系统表，生成与 export_meta.sql 兼容的 JSON。
 
     db_dir: 如 /pgdata/base/16384/
+    page_size: None=自动探测（页头编码）
     返回: {"database": "16384", "pg_version": 16, "tables": [...]}
     """
     meta = auto_discover_all_tables(db_dir, page_size=page_size)

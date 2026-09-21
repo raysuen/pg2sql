@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.1
+# version: 2.2
 """
 pg2sql.heapfile
 堆文件读取与导出引擎：遍历页面、提取元组、关联 TOAST、坏页容错。
@@ -17,7 +17,7 @@ v1.7（对照 PG varatt.h / pg_filedump / PDU 复核）：
 import os
 import struct
 
-from .page import Page, PAGE_SIZE, ITEMID_NORMAL
+from .page import Page, PAGE_SIZE, ITEMID_NORMAL, detect_page_size
 from .tuple import (
     HeapTuple, HEAP_TUPLE_HEADER_SIZE, HEAP_NATTS_MASK,
     HEAP_HASNULL, HEAP_HASOID,
@@ -280,9 +280,10 @@ def _decode_fields(fields, nulls, table_meta, toast):
 class HeapFile:
     """PostgreSQL 堆文件读取器。"""
 
-    def __init__(self, path: str, page_size: int = PAGE_SIZE, pg_version: int = 12,
+    def __init__(self, path: str, page_size: int = None, pg_version: int = 12,
                  is_kingbase: bool = False):
         self.path = path
+        # page_size=None 时在 iter_pages() 首次打开文件时自动探测（页头编码）
         self.page_size = page_size
         # PG 主版本：影响 NULL 位图语义（P2-1）与元组头校验（P2-2）
         self.pg_version = int(pg_version) if pg_version else 12
@@ -305,12 +306,21 @@ class HeapFile:
         """逐页产出 (pageno, Page)，坏页跳过但记录。"""
         with open(self.path, "rb") as f:
             self.filesize = os.fstat(f.fileno()).st_size
+            if self.page_size is None:
+                # 自动探测页大小：页头 pd_pagesize_version 高位编码
+                f.seek(0)
+                ps = detect_page_size(f.read(130))
+                if ps is None:
+                    # 兜底：极小文件（单页）按实际大小，否则默认 8KB
+                    ps = self.filesize if 0 < self.filesize <= 32768 else PAGE_SIZE
+                self.page_size = ps
+                f.seek(0)
             self.npages = self.filesize // self.page_size
             for pageno in range(self.npages):
                 raw = f.read(self.page_size)
                 if len(raw) < self.page_size:
                     break
-                page = Page(pageno, raw)
+                page = Page(pageno, raw, page_size=self.page_size)
                 if not page.has_valid_layout:
                     self.bad_pages.append(pageno)
                     continue

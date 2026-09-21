@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 1.9
+# version: 2.0
 """
 pg2sql.toast
 TOAST 表解析与重组。
@@ -27,7 +27,7 @@ import struct
 import mmap as _mmap_mod
 from collections import OrderedDict
 
-from .page import Page, PAGE_SIZE, ITEMID_NORMAL
+from .page import Page, PAGE_SIZE, ITEMID_NORMAL, detect_page_size
 from .tuple import HeapTuple
 from .binary import varlena_parse, VARLENA_1B, VARLENA_4B, VARLENA_4B_COMPRESSED
 
@@ -54,9 +54,10 @@ class ToastFile:
     重组统一入口 fetch_and_reassemble()，自动选择模式。
     """
 
-    def __init__(self, path, page_size=PAGE_SIZE,
+    def __init__(self, path, page_size=None,
                  page_cache_pages=DEFAULT_PAGE_CACHE_PAGES):
         self.path = path
+        # page_size=None 时在 load()/build_index() 首次打开时自动探测（页头编码）
         self.page_size = page_size
         self.pages = []  # 兼容保留（不再填充，流式处理）
         self._chunk_index = {}  # valueid -> [(seq, payload), ...] (全量模式)
@@ -71,6 +72,21 @@ class ToastFile:
     # ------------------------------------------------------------------
     # 页读取（mmap 优先，普通 read 回退）
     # ------------------------------------------------------------------
+
+    def _probe_size(self):
+        """自动探测页大小：页头 pd_pagesize_version 高位编码。"""
+        if self.page_size is not None:
+            return self.page_size
+        try:
+            with open(self.path, "rb") as f:
+                ps = detect_page_size(f.read(130))
+            if ps is None:
+                size = os.path.getsize(self.path)
+                ps = size if 0 < size <= 32768 else PAGE_SIZE
+        except OSError:
+            ps = PAGE_SIZE
+        self.page_size = ps
+        return ps
 
     def _ensure_file(self):
         if self._file is None:
@@ -112,6 +128,7 @@ class ToastFile:
         """
         self.pages = []
         self._chunk_index = {}
+        self._probe_size()
         file_size = os.path.getsize(self.path)
         npages = file_size // self.page_size
         if max_pages:
@@ -147,6 +164,7 @@ class ToastFile:
         全零页（新分配未使用）直接跳过，不进页头探测。
         """
         self._pos_index = {}
+        self._probe_size()
         file_size = os.path.getsize(self.path)
         npages = file_size // self.page_size
         with open(self.path, "rb") as f:
@@ -183,7 +201,7 @@ class ToastFile:
         本页无有效结果时回退数据区扫描。
         want_payload=False 时只校验不切片（轻量索引用）。
         """
-        page = Page(pageno, raw)
+        page = Page(pageno, raw, page_size=self.page_size)
         if not page.has_valid_layout:
             return []
 
@@ -317,7 +335,7 @@ class ToastFile:
         raw = self._read_page(pageno)
         if len(raw) < self.page_size:
             return None
-        page = Page(pageno, raw)
+        page = Page(pageno, raw, page_size=self.page_size)
         if not page.has_valid_layout:
             return None
         try:

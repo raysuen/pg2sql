@@ -1,11 +1,23 @@
+---
+AIGC:
+  ContentProducer: '001191110102MAD55U9H0F10002'
+  ContentPropagator: '001191110102MAD55U9H0F10002'
+  Label: '1'
+  ProduceID: '40e3ab79-2595-4bdb-9265-f3c810447b8d'
+  PropagateID: '40e3ab79-2595-4bdb-9265-f3c810447b8d'
+  ReservedCode1: '8c2f554a-ea6b-4c17-8bd3-aed1ad6080e7'
+  ReservedCode2: '8c2f554a-ea6b-4c17-8bd3-aed1ad6080e7'
+---
 
 # pg2sql
 
 > 离线解析 PostgreSQL / 金仓数据库（KingbaseES）堆数据文件并导出为 SQL
 
+> README 版本：v2.6（2026-09-21 全版本 16KB/32KB 闭环验证）
+
 ## 简介
 
-pg2sql 是一个纯 Python 编写的数据库数据文件解析工具，**无需实例运行，无需任何第三方依赖**。直接读取堆数据文件（`base/{db_oid}/{relfilenode}`），解析 8KB 堆页面中的 HeapTuple，输出 DDL 和 INSERT 语句（或 CSV），支持已删除行的审计恢复。
+pg2sql 是一个纯 Python 编写的数据库数据文件解析工具，**无需实例运行，无需任何第三方依赖**。直接读取堆数据文件（`base/{db_oid}/{relfilenode}`），**自动探测页大小（8KB / 16KB / 32KB，按 PostgreSQL `pd_pagesize_version` 权威语义 + 页内指针链校验）**，解析堆页面中的 HeapTuple，输出 DDL 和 INSERT 语句（或 CSV），支持已删除行的审计恢复。
 
 ## 兼容性（实测矩阵，2026-09 闭环验证）
 
@@ -16,6 +28,17 @@ pg2sql 是一个纯 Python 编写的数据库数据文件解析工具，**无需
 | 实测 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 覆盖：基础类型全列、dropped 列、TOAST 跨块大字段（30K–120K 字符）、枚举、interval、float 特殊值（NaN/±Infinity）、时间 ±infinity、声明式分区表（RANGE/LIST 子表）、序列依赖、ACL、20000 行批量。
+
+**Block Size（页大小自动探测，实测矩阵）**
+
+| 版本 | 12 | 13 | 14 | 15 | 16 | 17 | 18 |
+|---|---|---|---|---|---|---|---|
+| 16KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 32KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+全部 14 套（7 版本 × 16KB/32KB）均为：38 列全类型边界表（枚举/数组含 NULL 元素/jsonb 嵌套/inet/macaddr8/几何/±infinity/NaN/含引号换行文本等）→ 导出（自动探测页大小）→ 导入 8KB 实例 → count 与 38 列逐值一致。8KB 全版本（PG12-18）此前已闭环。
+
+页大小探测逻辑：读取页头 `pd_pagesize_version`（`size \| version`，`PageGetPageSize = psv & 0xFF00`），在候选集合 {8192, 16384, 32768} 中按 `lower<=upper<=special<=size` 指针链校验后确定，系统目录与 TOAST 文件同链路自动探测，无需 `--page-size` 参数。
 
 **金仓 KingbaseES（"导出 SQL/CSV + 可导入"闭环通过）**
 
@@ -264,6 +287,8 @@ SOFTWARE.
 
 ## 变更记录
 
+- **2026-09-21（全版本 Block Size 闭环轮 v2.6）**：编译并实测 PG17.11 / PG18.6 的 16KB/32KB 实例（编译环境缺 bison/flex，已源码级安装 GNU Bison 3.8.2 + Flex 2.6.4 至本地 _pgver/local）；连同此前 12-16 版本，**PG12-18 全 7 版本 × 16KB/32KB 共 14 套导出→导入→逐值一致闭环全部通过**（8KB 此前已闭环），页大小自动探测逻辑跨版本无差异（`pd_pagesize_version` 语义 PG12-18 不变）。
+- **2026-09-21（Block Size 自动探测轮 v2.5）**：新增任意页大小自动探测——page.py 1.6→1.7 `detect_page_size(raw)`（`pd_pagesize_version` 语义 + 页内指针链校验，支持 8/16/32KB）；heapfile.py 2.1→2.2 / toast.py 1.9→2.0 `page_size=None` 默认自动探测；catalog.py 2.6→2.7 系统目录探测 + 2.8 `_read_pages` 按探测页大小切页（修复 16KB 实例 pg_enum 被按 8192 切块致枚举映射为空、DDL 输出 `"c_mood" oid:16570` 的缺陷）；main.py 1.20→1.21 `--page-size` 默认 0（自动）。实测闭环：PG12.22 16KB、PG15.19 16KB、PG12.22 32KB 三套（38 列全类型边界表，导出→导入 8KB PG18→逐列值一致）；8KB 回归通过。`--page-size` 仍可显式指定覆盖。
 - **2026-09-21（金仓全表闭环轮 v2.3）**：修复金仓 dropped 列识别错位——catalog.py 2.5→2.6：金仓 V8（PG8.4 代际）与 V9（PG12 代际）实测同用扩展 pg_attribute 固定区（relid..inhcount 共 21 项 + collation），attisdropped 在索引 **17**、attcollation 在 **20**；旧代码沿用 PG12 标准位（16/19），致 V8 `ksh_history_data` 等表 dropped 列泄漏进 DDL（`"........kb.dropped.1........" oid:0` 非法语法）。修复后 V8/V9 全表 DDL 干净。同期完成金仓 5 实例（V8R6C8B14-mysql / V8R6C8B20-ora / V8R6C9B14-ora / V9 test / V9 ray）**全表导出 SQL+CSV+DDL** 与 **导入闭环**（PG18 承载库重建→预建 schema→自动提取预建金仓专属角色→逐表 DROP+导入→count(*) 与 CSV 行数逐表比对）：68/12/23/15/15 表全部一致，仅 v9ray `test01`（pg_class 快照表，relacl 引用源库专属角色 sso_oper 等）因源数据角色特性未闭环，非解析器缺陷；导出失败项均为 information_schema/pg_catalog 系统表（设计过滤）。
 - **2026-09-21（深度排查轮 v2.2）**：对照 PG18 源码 + 边界表 t_edge/t_net 实测定位并修复 6 处——① types.py 1.7→1.9 decode_array：`dataoffset` 是数据区相对 ArrayType 起点的绝对偏移（元素区起点 = dataoffset−4），位图字节数 = (nelems+7)//8（非 dataoffset），bit=1 表示非空（旧实现取反致含 NULL 数组全错位）；② types.py decode_inet/cidr 完全重写：PG7.4 起磁盘格式仅 family+bits+ipaddr（无 is_cidr/nb，恒 1B 头），旧实现把 varlena 头当 family 且按旧 4 字段布局解；③ types.py decode_interval：负数月转年用 C 整除（-13 mons → -1 years -1 mons，非 divmod）；④ types.py decode_jsonb：getJsonbOffset/getJsonbLength 按官方顺序推进语义重写（HAS_OFF 项重置为绝对终点 + 长度 = offlen−起点）；⑤ heapfile.py 2.0→2.1 to_data：改纯 COPY CSV 语义（引号包裹+双写、反斜杠原样、NULL 裸 \N），修复原 text/csv 混合转义导致数组/文本导入失败；⑥ main.py 1.19→1.20 `_resolve_output_path`：无扩展名视为前缀（--ddl --sql --data 组合输出不再互相覆盖）、带扩展名视为完整路径。验证：PG18 t_edge（16 列 × 3 行边界值：NULL 数组元素/多维数组/含引号换行反斜杠文本/inet v4v6/负 interval/jsonb 嵌套/NaN±Infinity）SQL+CSV 双路径导入逐列一致；t_net（inet/cidr/macaddr/macaddr8）导入一致；PG12-18 七版本精简边界表导出→导入 md5 全同；归档回归套件 12 项全过。
 - **2026-09-21（v2.0 README）**：对齐精简包结构（tests/diag 移出）；新增兼容性实测矩阵（PG12-18 + 金仓 V8R6C8B14/B20/V8R6C9B14/V9R1C10）；补充枚举/interval/float 特殊值支持与已知限制。

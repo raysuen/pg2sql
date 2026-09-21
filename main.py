@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# version: 1.20
+# version: 1.21
 """
 pg2sql - 离线解析 PostgreSQL 堆数据文件并导出为 SQL
 用法: python3 main.py <data_file> [options]
@@ -176,8 +176,8 @@ def build_parser():
     adv_group.add_argument("--toast-cache", default="light", choices=["light", "full"],
                             help="TOAST 缓存模式: light=轻量索引+页级LRU缓存(默认, 内存小); "
                                  "full=全量 payload 入内存(慢磁盘提速明显, 内存≈TOAST文件大小×2)")
-    adv_group.add_argument("--page-size", type=int, default=PAGE_SIZE, metavar="N",
-                           help="页面大小 (默认 8192, 非标准编译时需修改)")
+    adv_group.add_argument("--page-size", type=int, default=0, metavar="N",
+                           help="页面大小 (默认 0=自动探测页头编码; 可显式指定 8192/16384/32768)")
     adv_group.add_argument("--parallel", type=int, default=0, metavar="N",
                            help="并发进程数 (大文件加速, 0=单进程)")
     adv_group.add_argument("--verbose", action="store_true", default=False,
@@ -313,21 +313,22 @@ def _find_toast_path(args):
         from pg2sql.page import Page
         from pg2sql.heapfile import _is_kb_external, KB_EXTERNAL_SIZE
 
+        page_size = args.page_size or _probe_file_page_size(args.datafile)
         # 外联指针通常在前几页就出现，限制扫描页数避免大文件全扫
         MAX_SCAN_PAGES = 8
         file_size = os.path.getsize(args.datafile)
-        npages = min(file_size // args.page_size, MAX_SCAN_PAGES)
+        npages = min(file_size // page_size, MAX_SCAN_PAGES)
         with open(args.datafile, "rb") as f:
             for pageno in range(npages):
-                raw = f.read(args.page_size)
-                if len(raw) < args.page_size:
+                raw = f.read(page_size)
+                if len(raw) < page_size:
                     break
-                page = Page(pageno, raw)
+                page = Page(pageno, raw, page_size=page_size)
                 if not page.has_valid_layout:
                     continue
                 # 在数据区扫描外联指针
                 pd_upper = page.header.get("upper", 0)
-                pd_special = page.header.get("special", args.page_size)
+                pd_special = page.header.get("special", page_size)
                 if pd_upper < page.header_size or pd_upper >= pd_special:
                     continue
                 # 快速预判: 页面数据区含 0x01 0x12 才逐字节细扫
@@ -365,6 +366,19 @@ def _find_toast_path(args):
                 continue
 
     return None
+
+
+def _probe_file_page_size(path: str) -> int:
+    """自动探测数据文件页大小（页头编码）；失败回退 8192。"""
+    from pg2sql.page import detect_page_size
+    try:
+        with open(path, "rb") as f:
+            ps = detect_page_size(f.read(130))
+        if ps:
+            return ps
+    except OSError:
+        pass
+    return PAGE_SIZE
 
 
 def _auto_detect_toast(args, hf, table_meta):
@@ -732,8 +746,9 @@ def run_parallel(args, meta, table_meta):
     """
     import time as _time
 
+    page_size = args.page_size or _probe_file_page_size(args.datafile)
     file_size = os.path.getsize(args.datafile)
-    npages = file_size // args.page_size
+    npages = file_size // page_size
     n_workers = args.parallel
 
     BATCH_PAGES = 256  # 每批次页面数（约 2MB/批，保证内存占用小且吞吐稳定）
@@ -746,7 +761,7 @@ def run_parallel(args, meta, table_meta):
     toast_mode = getattr(args, "toast_cache", "light")
     if toast_path:
         t0 = _time.time()
-        toast_probe = ToastFile(toast_path, page_size=args.page_size)
+        toast_probe = ToastFile(toast_path, page_size=page_size)
         if toast_mode == "full":
             toast_probe.load()
             toast_index = toast_probe._chunk_index
@@ -769,7 +784,7 @@ def run_parallel(args, meta, table_meta):
     ranges = []
     for batch_idx, start in enumerate(range(0, npages, BATCH_PAGES)):
         end = min(start + BATCH_PAGES, npages)
-        ranges.append((batch_idx, args.datafile, args.page_size, start, end,
+        ranges.append((batch_idx, args.datafile, page_size, start, end,
                        tm_dict, toast_path, del_mode, pg_version, is_kb))
 
     if not ranges:
@@ -1498,6 +1513,10 @@ def _is_pg_database_content(path, verbose=False):
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    # --page-size 0 = 自动探测（页头 pd_pagesize_version 编码）
+    if args.page_size == 0:
+        args.page_size = None
 
     # 无任何参数时显示帮助
     if len(sys.argv) == 1:
