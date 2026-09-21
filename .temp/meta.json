@@ -1,0 +1,32 @@
+{
+  "database": "testdb",
+  "tables": [
+    {
+      "schema": "public",
+      "table": "users",
+      "relfilenode": 16384,
+      "toastrelid": 0,
+      "primary_key": [
+        "id"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type_oid": 23,
+          "len": 4,
+          "attnum": 1,
+          "typmod": -1,
+          "notnull": true
+        },
+        {
+          "name": "name",
+          "type_oid": 25,
+          "len": -1,
+          "attnum": 2,
+          "typmod": -1,
+          "notnull": false
+        }
+      ]
+    }
+  ]
+}
