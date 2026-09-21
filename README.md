@@ -1,19 +1,7 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '40e3ab79-2595-4bdb-9265-f3c810447b8d'
-  PropagateID: '40e3ab79-2595-4bdb-9265-f3c810447b8d'
-  ReservedCode1: '8c2f554a-ea6b-4c17-8bd3-aed1ad6080e7'
-  ReservedCode2: '8c2f554a-ea6b-4c17-8bd3-aed1ad6080e7'
----
 
 # pg2sql
 
 > 离线解析 PostgreSQL / 金仓数据库（KingbaseES）堆数据文件并导出为 SQL
-
-> README 版本：v2.4（2026-09-21 许可改为 MIT）
 
 ## 简介
 
