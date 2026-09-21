@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# version: 1.18
+# version: 1.20
 """
 pg2sql - 离线解析 PostgreSQL 堆数据文件并导出为 SQL
 用法: python3 main.py <data_file> [options]
@@ -789,7 +789,8 @@ def run_parallel(args, meta, table_meta):
         out_fp.write(table_meta.generate_ddl() + "\n\n")
 
     # 预生成 SQL 模板（避免每行重复构建）
-    col_names = [c.name for c in table_meta.columns if not c.attdropped]
+    live_cols = [c for c in table_meta.columns if not c.attdropped]
+    col_names = [c.name for c in live_cols]
     col_str = f"({', '.join(chr(34)+c+chr(34) for c in col_names)})" if args.complete_insert else ""
     target = f'"{table_meta.schema}"."{table_meta.relname}"'
     verb = "REPLACE INTO" if args.replace else "INSERT INTO"
@@ -820,9 +821,11 @@ def run_parallel(args, meta, table_meta):
                 elif v == "__TOAST_MISSING__":
                     sql_vals.append("NULL")
                 else:
-                    col = table_meta.columns[i]
+                    # 注意: values 只含未 dropped 列（_decode_fields 已跳过），
+                    # 索引必须对齐 live_cols，不能直接用 table_meta.columns
+                    col = live_cols[i] if i < len(live_cols) else None
                     # 数字类型不加引号（xid/cid 除外：PG 无 int→xid 隐式转换，需文本输入）
-                    if col.atttypid in (16, 20, 21, 23, 26, 700, 701, 1700):
+                    if col is not None and col.atttypid in (16, 20, 21, 23, 26, 700, 701, 1700):
                         sv = str(v)
                         # float 特殊值（NaN/±Infinity）PG 需要文本字面量，裸标识符非法
                         if sv in ("NaN", "Infinity", "-Infinity"):
@@ -887,7 +890,8 @@ def _resolve_output_path(output, table_meta, file_type):
 
     - 如果 output 是已存在的目录 → 自动命名: schema.table.type
     - 如果 output 以 / 结尾 → 视为目录，自动命名
-    - 否则 → 视为文件路径，直接使用
+    - 否则 → 视为文件前缀，追加 .sql/.csv 扩展名
+      （避免 --ddl/--sql 与 --data 组合输出互相覆盖同一文件）
 
     file_type: 'sql', 'ddl', 'csv'
     """
@@ -898,8 +902,10 @@ def _resolve_output_path(output, table_meta, file_type):
         return os.path.join(output, basename)
     if os.path.isdir(output):
         return os.path.join(output, basename)
-    # 视为文件路径
-    return output
+    # 带任意扩展名 → 视为完整文件路径直接使用；否则视为文件前缀追加扩展名
+    if os.path.splitext(output)[1]:
+        return output
+    return output + "." + ext
 
 
 # ======================================================================
@@ -1224,14 +1230,15 @@ def _parse_pg_class(path: str, verbose: bool = False) -> tuple:
     # ===== 阶段 2: 原始扫描模式（不依赖页头）=====
     if verbose:
         log(f"  阶段1无结果，回退到原始扫描模式...")
-    return _parse_pg_class_raw_scan(path, verbose)
+    return _parse_pg_class_raw_scan(path, version, verbose)
 
 
-def _parse_pg_class_raw_scan(path: str, verbose: bool = False) -> tuple:
+def _parse_pg_class_raw_scan(path: str, version: int = 0, verbose: bool = False) -> tuple:
     """数据区扫描模式: 不依赖 ItemId，直接在每页的 pd_upper~pd_special 区域
     按 [OID 4B][relname 64B] 模式定位元组数据。
 
     适用于金仓等非标准 PG 分支的 ItemId 格式。
+    version: PG 主版本（0=未知，按 PG11 布局 115；>=18 用 119）。
     """
     from pg2sql.page import Page, PAGE_SIZE
     from pg2sql.binary import cstring
@@ -1306,12 +1313,14 @@ def _parse_pg_class_raw_scan(path: str, verbose: bool = False) -> tuple:
                 if rfn_off + 4 <= pd_special:
                     rfn = _s.unpack_from("<I", raw, rfn_off)[0]
 
-                # relkind: 第 14 列
+                # relkind: 第 16 列（PG11 布局含 reloftype/relallvisible）
                 # 布局继续: ...[reltablespace 4B][relpages 4B][reltuples 4B]
-                #           [relallvisible 4B][reltoastrelid 4B][relhasindex 1B][relkind 1B]
-                # relkind 偏移 = 88 + 4 + 4 + 4 + 4 + 4 + 1 = 109
+                #           [relallvisible 4B][reltoastrelid 4B][relhasindex 1B]
+                #           [relisshared 1B][relpersistence 1B][relkind 1B]
+                # relkind 偏移 = 88 + 5*4 + 3*1 = 115（PG12-17）；
+                # PG18 在 relallvisible 后新增 relallfrozen(int4) → 119
                 relkind = "r"
-                rk_off = pos + 109
+                rk_off = pos + (119 if version >= 18 else 115)
                 if rk_off + 1 <= pd_special:
                     relkind = chr(raw[rk_off])
 

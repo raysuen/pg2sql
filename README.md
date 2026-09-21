@@ -1,9 +1,8 @@
-
 # pg2sql
 
 > 离线解析 PostgreSQL / 金仓数据库（KingbaseES）堆数据文件并导出为 SQL
 
-> README 版本：v2.0（2026-09-21 重写，对齐当前精简包结构，补充全版本实测矩阵）
+> README 版本：v2.4
 
 ## 简介
 
@@ -26,9 +25,9 @@ pg2sql 是一个纯 Python 编写的数据库数据文件解析工具，**无需
 | 兼容模式 | MySQL | Oracle | Oracle | MySQL |
 | 内核代际 | 早期（PG8.4 代际） | 同左 | 同左 | PG12 代际 |
 | 系统表命名 | `_` 短名（`_rel`/`_att`/`_typ`） | 同左 | 同左 | `sys_*` |
-| 实测 | ✅ 10 张用户表 | ✅ 5 张用户表 | ✅ 16 张用户表 | ✅ 早期轮次闭环 |
+| 实测用户表 | ✅ 68 张 | ✅ 12 张 | ✅ 23 张 | ✅ test 15 张 / ray 16 张 |
 
-金仓 V8 系列系统表 oid 仍为标准值（sys_class=1259 / sys_attribute=1249 / sys_type=1247），catalog 自动发现按 oid 定位、与表名前缀无关，同一代码库同时兼容 V8/V9 双代际。
+金仓 V8 系列系统表 oid 仍为标准值（sys_class=1259 / sys_attribute=1249 / sys_type=1247），catalog 自动发现按 oid 定位、与表名前缀无关，同一代码库同时兼容 V8/V9 双代际。每实例全表"导出 SQL/CSV/DDL → 导入 PG18 承载库 → count(*) 与 CSV 行数逐表一致"闭环通过；导出失败项均为带 information_schema/pg_catalog 的系统表（main.py 设计过滤），非缺陷。
 
 ## 快速开始
 
@@ -221,6 +220,7 @@ pg2sql 针对金仓数据库（KingbaseES）非标准格式的适配：
 | ItemId 格式 | 标准 | 不兼容 | 数据区扫描模式自动回退 |
 | varlena 1B 头 | `len = header` | `VARSIZE = header >> 1` | `types.py` / `binary.py` / `heapfile.py` 三处修复 |
 | pg_attribute 布局 | 无 attcollation | 多 attcollation + 额外字段 | `_scan_pg_attribute` 偏移调整（V8/V9 均覆盖） |
+| dropped 列位 | PG12+：attisdropped=16 | V8/V9：attisdropped=17（固定区含 hasdef/hasmissing/identity/generated） | `_attr_idx` 金仓分支索引 17 / attcollation 20 |
 | 删除可见性 | xmax hint bits | hint bits 未设置 | `t_xmax != 0` 判定已删除行 |
 | 系统表命名 | pg_* | V9：sys_*；V8：`_` 短名 | catalog 按标准 oid 定位，与前缀无关 |
 
@@ -237,11 +237,38 @@ pg2sql 针对金仓数据库（KingbaseES）非标准格式的适配：
 
 ## 要求与许可
 
-Python >= 3.6，无第三方依赖。GPL-3.0。
+Python >= 3.6，无第三方依赖。MIT License。
+
+```
+MIT License
+
+Copyright (c) 2026 pg2sql contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## 变更记录
 
+- **2026-09-21（金仓全表闭环轮 v2.3）**：修复金仓 dropped 列识别错位——catalog.py 2.5→2.6：金仓 V8（PG8.4 代际）与 V9（PG12 代际）实测同用扩展 pg_attribute 固定区（relid..inhcount 共 21 项 + collation），attisdropped 在索引 **17**、attcollation 在 **20**；旧代码沿用 PG12 标准位（16/19），致 V8 `ksh_history_data` 等表 dropped 列泄漏进 DDL（`"........kb.dropped.1........" oid:0` 非法语法）。修复后 V8/V9 全表 DDL 干净。同期完成金仓 5 实例（V8R6C8B14-mysql / V8R6C8B20-ora / V8R6C9B14-ora / V9 test / V9 ray）**全表导出 SQL+CSV+DDL** 与 **导入闭环**（PG18 承载库重建→预建 schema→自动提取预建金仓专属角色→逐表 DROP+导入→count(*) 与 CSV 行数逐表比对）：68/12/23/15/15 表全部一致，仅 v9ray `test01`（pg_class 快照表，relacl 引用源库专属角色 sso_oper 等）因源数据角色特性未闭环，非解析器缺陷；导出失败项均为 information_schema/pg_catalog 系统表（设计过滤）。
+- **2026-09-21（深度排查轮 v2.2）**：对照 PG18 源码 + 边界表 t_edge/t_net 实测定位并修复 6 处——① types.py 1.7→1.9 decode_array：`dataoffset` 是数据区相对 ArrayType 起点的绝对偏移（元素区起点 = dataoffset−4），位图字节数 = (nelems+7)//8（非 dataoffset），bit=1 表示非空（旧实现取反致含 NULL 数组全错位）；② types.py decode_inet/cidr 完全重写：PG7.4 起磁盘格式仅 family+bits+ipaddr（无 is_cidr/nb，恒 1B 头），旧实现把 varlena 头当 family 且按旧 4 字段布局解；③ types.py decode_interval：负数月转年用 C 整除（-13 mons → -1 years -1 mons，非 divmod）；④ types.py decode_jsonb：getJsonbOffset/getJsonbLength 按官方顺序推进语义重写（HAS_OFF 项重置为绝对终点 + 长度 = offlen−起点）；⑤ heapfile.py 2.0→2.1 to_data：改纯 COPY CSV 语义（引号包裹+双写、反斜杠原样、NULL 裸 \N），修复原 text/csv 混合转义导致数组/文本导入失败；⑥ main.py 1.19→1.20 `_resolve_output_path`：无扩展名视为前缀（--ddl --sql --data 组合输出不再互相覆盖）、带扩展名视为完整路径。验证：PG18 t_edge（16 列 × 3 行边界值：NULL 数组元素/多维数组/含引号换行反斜杠文本/inet v4v6/负 interval/jsonb 嵌套/NaN±Infinity）SQL+CSV 双路径导入逐列一致；t_net（inet/cidr/macaddr/macaddr8）导入一致；PG12-18 七版本精简边界表导出→导入 md5 全同；归档回归套件 12 项全过。
 - **2026-09-21（v2.0 README）**：对齐精简包结构（tests/diag 移出）；新增兼容性实测矩阵（PG12-18 + 金仓 V8R6C8B14/B20/V8R6C9B14/V9R1C10）；补充枚举/interval/float 特殊值支持与已知限制。
 - **2026-09-20（修复版）**：修复《源码评审报告》6 个 P1 + 4 个 P2 缺陷并在 PG16.4 双路径回归通过。关键变更：export_meta.sql 重写（OID 显式 ::int、jsonb_pretty）；catalog.py 全版本感知布局 + OID 首列公式；heapfile.py 列级 attalign 对齐 + dropped 列占位；tuple.py 版本门控；types.py jsonb/数组/短 numeric/枚举解码。
 - **2026-09-21（扩展类型轮）**：枚举列读 pg_enum 映射 + CREATE TYPE 前置（catalog.py 2.4）；interval 对齐 PG EncodeInterval 输出（types.py 1.7）；float NaN/±Infinity 带引号字面量（heapfile.py 1.8 / main.py 1.18）。
 - **2026-09-21（全版本轮）**：PG12/13 attstorage/attalign 顺序 + attinhcount int4；PG18 pg_class 新增 relallfrozen（用户列偏移 115→119）；PG18 pg_attribute 删 attcacheoff 且 typmod/ndims 换位；PG17 stattarg/collation 交换。
+- **2026-09-21（v2.4）**：许可由 GPL-3.0 改为 MIT License（附完整许可文本）。

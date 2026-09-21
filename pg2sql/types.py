@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 1.7
+# version: 2.1
 """
 pg2sql.types
 PostgreSQL 内置类型解码。将字段原始字节解码为可打印/可导入的 SQL 文本值。
@@ -401,7 +401,10 @@ def decode_timetz(b: bytes) -> str:
     us = struct.unpack("<q", b[:8])[0]
     zone = struct.unpack("<i", b[8:12])[0]
     t = _time_from_us(us)
-    sign = "+" if zone >= 0 else "-"
+    # PG datetime.c EncodeTimezone：磁盘 zone 与显示符号相反
+    # （"TZ is negated compared to sign we wish to display"），
+    # zone<=0 显示 '+', zone>0 显示 '-'。
+    sign = "-" if zone >= 0 else "+"
     zone = abs(zone)
     return f"{t}{sign}{zone//3600:02d}:{zone%3600//60:02d}"
 
@@ -415,7 +418,10 @@ def decode_interval(b: bytes) -> str:
     time_us = struct.unpack("<q", b[:8])[0]
     day = struct.unpack("<i", b[8:12])[0]
     month = struct.unpack("<i", b[12:16])[0]
-    year, month = divmod(month, 12)
+    # C 整除语义（向零截断）：PG interval2tm 用 / 与 %，-13 mons → -1 years -1 mons；
+    # Python divmod(-13,12)=(-2,11) 会错标年份（数值等价但文本不同）
+    year = int(month / 12)
+    month -= year * 12
     parts = []
     if year:
         parts.append(f"{year} year" if year == 1 else f"{year} years")
@@ -604,14 +610,20 @@ def _jsonb_container_to_text(payload: bytes) -> str:
     ents = [struct.unpack_from("<I", payload, 4 + 4 * i)[0] for i in range(n_ent)]
 
     def get_offset(idx):
+        # PG getJsonbOffset 权威语义（jsonb_util.c + JBE_ADVANCE_OFFSET）：
+        # 从数据区起点顺序推进到 idx 前一项——HAS_OFF 项存"该元素终点
+        # 绝对偏移"（重置 offset），无 HAS_OFF 项存长度（累加）。
         off = 0
-        for i in range(idx - 1, -1, -1):
-            off += ents[i] & 0x0FFFFFFF
+        for i in range(idx):
             if ents[i] & JENTRY_HAS_OFF:
-                break
+                off = ents[i] & 0x0FFFFFFF
+            else:
+                off += ents[i] & 0x0FFFFFFF
         return off
 
     def jlen(idx):
+        # PG getJsonbLength：HAS_OFF 项长度 = 终点偏移 - 起点偏移；
+        # 无 HAS_OFF 项直接取 offlen
         if ents[idx] & JENTRY_HAS_OFF:
             return (ents[idx] & 0x0FFFFFFF) - get_offset(idx)
         return ents[idx] & 0x0FFFFFFF
@@ -816,12 +828,16 @@ def decode_array(b: bytes) -> str:
 
     nulls = None
     if dataoffset > 0:
-        bm_off = body_off
-        bm_len = dataoffset
-        bm = payload[bm_off:bm_off + bm_len]
-        nulls = [bool(bm[i // 8] & (1 << (i % 8))) for i in range(nelems)]
-        elem_off = bm_off + bm_len
-        # 元素区按 4 对齐
+        bm_len = (nelems + 7) // 8
+        bm = payload[body_off:body_off + bm_len]
+        # PG 数组位图：bit=1 → 非空元素（arrayfuncs.CopyArrayEls 中 NULL 元素
+        # 位图位保持 0，与 tuple 位图语义一致）；旧实现取反导致含 NULL 数组错乱
+        nulls = [not bool(bm[i // 8] & (1 << (i % 8))) for i in range(nelems)]
+        # 元素区起点（相对 payload）= dataoffset - 4：dataoffset 按 4B vl_len_
+        # ArrayType 布局计算（ARR_OVERHEAD_WITHNULLS），payload 不含 vl_len_，
+        # 1B/4B 头通用减 4（实测 PG18 {1,NULL,3} dataoffset=32 → 元素区 28）
+        elem_off = dataoffset - 4
+        # 元素区按 4 对齐（dataoffset 通常已 MAXALIGN，双保险）
         elem_off = (elem_off + 3) & ~3
     else:
         elem_off = body_off
@@ -877,21 +893,36 @@ def _array_quote(s: str) -> str:
     return '"' + s + '"'
 
 
-def decode_inet(b: bytes) -> str:
-    if len(b) < 4:
+def decode_inet(b: bytes, force_cidr: bool = False) -> str:
+    """inet/cidr → 文本。PG18 权威磁盘格式（inet.h inet_struct）：
+
+        1B/4B varlena 头 + family(1) + bits(1) + ipaddr(4|16)
+
+    无 is_cidr/nb 字段（7.4 起移除，addr 长度由 family 推导，恒用 1B 头存储）；
+    旧实现把 varlena 头当 family 且按旧 4 字段布局解，导致输出原始 hex。
+    """
+    payload, _, _ = _var(b)
+    if len(payload) < 2:
         return ""
-    family = b[0]
-    bits = b[1]
-    is_cidr = b[2]
-    nbytes = b[3]
-    addr = b[4 : 4 + nbytes]
+    family = payload[0]
+    bits = payload[1]
+    if family not in (2, 3):
+        return ""
+    nbytes = 4 if family == 2 else 16
+    addr = payload[2:2 + nbytes]
     if family == 2:
         s = ".".join(str(x) for x in addr)
     else:
         s = ":".join(f"{addr[i] << 8 | addr[i+1]:x}" for i in range(0, len(addr), 2))
-    if is_cidr:
+    # PG inet_out：非默认掩码（v4=/32、v6=/128）输出 /bits；cidr 恒输出
+    default_bits = 32 if family == 2 else 128
+    if force_cidr or bits != default_bits:
         return f"{s}/{bits}"
     return s
+
+
+def decode_cidr(b: bytes) -> str:
+    return decode_inet(b, force_cidr=True)
 
 
 def decode_macaddr(b: bytes) -> str:
@@ -922,6 +953,79 @@ def decode_bit(b: bytes) -> str:
 def decode_money(b: bytes) -> str:
     v = struct.unpack("<q", b[:8])[0]
     return f"{v / 100:.2f}"
+
+
+# --------------------------------------------------------------------------
+# 几何类型（PG geometric types，磁盘均为小端 IEEE float8）
+#   point(600) 16B: x y          lseg(601) 32B: x1 y1 x2 y2
+#   path(602)  varlena: int32 npts + int32 closed + npts*16B
+#   box(603)   32B: 高右(x1,y1) 低左(x2,y2)   polygon(604) varlena: npts + npts*16B
+#   line(628)  24B: A B C        circle(718) 24B: 圆心(x,y) + 半径 r
+# 输出格式对齐 PG 各 *_out：point (x,y)；lseg [(x1,y1),(x2,y2)]；
+#   box (x1,y1),(x2,y2)；path closed "((..))" open "[(..)]"；polygon "((..))"；
+#   line {A,B,C}；circle <(x,y),r>
+# --------------------------------------------------------------------------
+def _geom_pt(b: bytes, off: int) -> str:
+    x, y = struct.unpack_from("<dd", b, off)
+    return f"({_fmt_float(x)},{_fmt_float(y)})"
+
+
+def decode_point(b: bytes) -> str:
+    return _geom_pt(b, 0) if len(b) >= 16 else ""
+
+
+def decode_lseg(b: bytes) -> str:
+    if len(b) < 32:
+        return ""
+    return f"[{_geom_pt(b, 0)},{_geom_pt(b, 16)}]"
+
+
+def decode_box(b: bytes) -> str:
+    if len(b) < 32:
+        return ""
+    return f"{_geom_pt(b, 0)},{_geom_pt(b, 16)}"
+
+
+def decode_path(b: bytes) -> str:
+    payload, _, _ = _var(b)
+    if len(payload) < 12:
+        return ""
+    # 磁盘 PATH = npts(int32) + closed(bool+3B pad) + dummy(int32) + points*16B
+    # （geo_decls.h PATH 结构；points 从 offset 12 起，头共 12B）
+    npts, closed = struct.unpack_from("<ii", payload, 0)
+    if npts <= 0 or len(payload) < 12 + 16 * npts:
+        return ""
+    pts = [_geom_pt(payload, 12 + 16 * i) for i in range(npts)]
+    if closed:
+        return "(" + ",".join(pts) + ")"
+    return "[" + ",".join(pts) + "]"
+
+
+def decode_polygon(b: bytes) -> str:
+    payload, _, _ = _var(b)
+    if len(payload) < 36:
+        return ""
+    # 磁盘 POLYGON = npts(int32) + boundbox(BOX 32B) + points*16B
+    # （geo_decls.h POLYGON 结构；points 从 offset 36 起）
+    npts = struct.unpack_from("<i", payload, 0)[0]
+    if npts <= 0 or len(payload) < 36 + 16 * npts:
+        return ""
+    pts = [_geom_pt(payload, 36 + 16 * i) for i in range(npts)]
+    return "(" + ",".join(pts) + ")"
+
+
+def decode_line(b: bytes) -> str:
+    if len(b) < 24:
+        return ""
+    a, bb, c = struct.unpack_from("<ddd", b, 0)
+    return f"{{{_fmt_float(a)},{_fmt_float(bb)},{_fmt_float(c)}}}"
+
+
+def decode_circle(b: bytes) -> str:
+    if len(b) < 24:
+        return ""
+    x, y, r = struct.unpack_from("<ddd", b, 0)
+    return f"<({_fmt_float(x)},{_fmt_float(y)}),{_fmt_float(r)}>"
 
 
 def decode_char(b: bytes) -> str:
@@ -1026,7 +1130,7 @@ DECODERS = {
     JSONOID: decode_json,
     JSONBOID: decode_jsonb,  # P1-6: jsonb 二进制解码（原误挂 decode_json 纯文本）
     INETOID: decode_inet,
-    CIDROID: decode_inet,
+    CIDROID: decode_cidr,
     MACADDROID: decode_macaddr,
     MACADDR8OID: decode_macaddr8,
     BITOID: decode_bit,
@@ -1037,6 +1141,14 @@ DECODERS = {
     PG_NODE_TREEOID: decode_pg_node_tree,
     OIDVECTOROID: decode_oidvector,
     INT2VECTOROID: decode_int2vector,
+    # 几何类型（600/601/602/603/604/628/718）
+    600: decode_point,
+    601: decode_lseg,
+    602: decode_path,
+    603: decode_box,
+    604: decode_polygon,
+    628: decode_line,
+    CIRCLEOID: decode_circle,
 }
 # P1-6: 数组类型统一走 decode_array
 for _oid in ARRAY_TYPE_OIDS:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.4
+# version: 2.6
 """
 pg2sql.catalog
 表结构元数据管理。
@@ -245,11 +245,16 @@ def _pg_attribute_layout(version: int, is_kingbase: bool = False):
 def _attr_idx(version: int, is_kingbase: bool = False):
     """返回 {字段名: 列索引}。"""
     if is_kingbase:
-        # 金仓实测：attstorage 在 attalign 前（PG<=11 风格），索引与 PG<=11 一致
+        # 金仓实测（V8 PG8.4 代际与 V9 PG12 代际同用扩展布局，见 _pg_attribute_layout）：
+        #   attstorage 在 attalign 前；固定区为
+        #   relid name typid stattarg len num ndims(int4) cacheoff typmod byval
+        #   storage align notnull hasdef hasmissing identity generated isdropped
+        #   islocal inhcount collation —— 故 attisdropped=17、attcollation=20。
+        # 曾用 16/19（PG12 标准位），V8 dropped 列因此未识别而泄漏进 DDL。
         return dict(attrelid=0, attname=1, atttypid=2, attstattarget=3, attlen=4,
                     attnum=5, attndims=6, attcacheoff=7, atttypmod=8, attbyval=9,
-                    attstorage=10, attalign=11, attnotnull=12, attisdropped=16,
-                    attcollation=19)
+                    attstorage=10, attalign=11, attnotnull=12, attisdropped=17,
+                    attcollation=20)
     if version >= 18:
         return dict(attrelid=0, attname=1, atttypid=2, attlen=3, attnum=4,
                     atttypmod=5, attndims=6, attbyval=7, attalign=8,
@@ -784,8 +789,8 @@ def parse_catalog_offline(datadir: str, db_oid: int = 5) -> dict:
     """
     version = detect_pg_version(datadir) or 16
     is_kb = is_kingbase_datadir(datadir)
-    type_map = build_type_name_map(base)
     base = os.path.join(datadir, "base", str(db_oid))
+    type_map = build_type_name_map(base)
     pg_attribute_path = os.path.join(base, str(PG_ATTRIBUTE_RELFILE))
     pg_class_path = os.path.join(base, str(PG_CLASS_RELFILE))
 

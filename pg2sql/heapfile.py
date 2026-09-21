@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 1.8
+# version: 2.1
 """
 pg2sql.heapfile
 堆文件读取与导出引擎：遍历页面、提取元组、关联 TOAST、坏页容错。
@@ -434,85 +434,80 @@ class HeapFile:
         两者都为 False: 只输出未删除的行
 
         策略：统一使用 _extract_fields_direct（无偏移表）提取字段，
-        先试 ItemId 标准模式定位元组，若结果全空则回退到数据区扫描模式。
+        先试 ItemId 标准模式定位元组，若结果全空（或全部为 NULL/
+        无效值）则回退到数据区扫描模式——标准模式行先收集、判定
+        有效后才输出，避免"全 NULL 表"被两阶段各输出一遍而重复。
         """
         if only_deleted:
             include_deleted = True  # only_deleted 隐含 include_deleted
-        count = 0
         toast = self._toast
         col_lengths = _build_col_lengths(table_meta)
         # 元组 nattrs = 全部列（含 dropped），扫描模式校验必须用全列数
         n_expected = len(table_meta.columns)
 
-        # ---- 阶段 1: 标准 ItemId 模式定位元组 ----
-        standard_rows = []
-        found_standard = False
-        for pageno, idx, tup in self.iter_tuples(include_deleted=True):
-            found_standard = True
+        # 行是否"有效"：至少一个非空非占位值（全 NULL 行不算）
+        def _row_has_valid(r):
+            for v in r["values"]:
+                if v is not None and v != "" and v != "__TOAST_MISSING__":
+                    return True
+            return False
+
+        def _build_row(tup, pos_tag):
             deleted = tup.is_deleted  # 真删除（排除 abort/锁/multi）
             if not tup.is_live and not deleted:
-                continue  # 插入已回滚等死行，任何模式都不输出
+                return None  # 插入已回滚等死行，任何模式都不输出
             if not include_deleted and deleted:
-                continue
+                return None
             if only_deleted and not deleted:
-                continue
+                return None
             nulls = tup.get_nulls()
-            # 统一使用直接字段提取（兼容无偏移表的金仓格式）
             fields = _extract_fields_direct(
                 tup.raw, tup.t_hoff, nulls, col_lengths
             )
             values = _decode_fields(fields, nulls, table_meta, toast)
-            row = {
-                "ctid": f"({pageno},{idx})",
+            return {
+                "ctid": f"({pos_tag[0]},{pos_tag[1]})",
                 "values": values,
                 "deleted": deleted,
             }
+
+        # ---- 阶段 1: 标准 ItemId 模式定位元组（收集后判定再输出）----
+        standard_rows = []
+        found_standard = False
+        has_valid = False
+        count = 0
+        for pageno, idx, tup in self.iter_tuples(include_deleted=True):
+            found_standard = True
+            row = _build_row(tup, (pageno, idx))
+            if row is None:
+                continue
             standard_rows.append(row)
+            if _row_has_valid(row):
+                has_valid = True
             count += 1
             if limit and count >= limit:
+                break
+
+        # 标准模式有有效数据：统一输出收集的行（不切换扫描，避免重复）
+        if found_standard and has_valid:
+            for row in standard_rows:
                 yield row
-                return
+            return
+
+        # ---- 阶段 2: 数据区扫描模式（金仓回退 / 全 NULL 表）----
+        # 注意：阶段 1 收集的行在切扫描时不输出（否则全 NULL 表重复）
+        count = 0
+        self.bad_pages = []
+        for pageno, pos, tup in self._iter_tuples_scan(
+            n_expected_cols=n_expected, col_lengths=col_lengths
+        ):
+            row = _build_row(tup, (pageno, pos))
+            if row is None:
+                continue
             yield row
-
-        # 检查标准模式结果是否有效（至少有一个非空非 NULL 值）
-        def _has_valid_data(rows):
-            for r in rows:
-                for v in r["values"]:
-                    if v is not None and v != "" and v != "__TOAST_MISSING__":
-                        return True
-            return False
-
-        # ---- 阶段 2: 数据区扫描模式（金仓回退）----
-        if not found_standard or not _has_valid_data(standard_rows):
-            if found_standard:
-                # 标准模式结果无效，重置并使用扫描模式
-                pass
-            count = 0
-            self.bad_pages = []
-            for pageno, pos, tup in self._iter_tuples_scan(
-                n_expected_cols=n_expected, col_lengths=col_lengths
-            ):
-                deleted = tup.is_deleted
-                if not tup.is_live and not deleted:
-                    continue  # 插入已回滚等死行
-                if not include_deleted and deleted:
-                    continue
-                if only_deleted and not deleted:
-                    continue
-                nulls = tup.get_nulls()
-                fields = _extract_fields_direct(
-                    tup.raw, tup.t_hoff, nulls, col_lengths
-                )
-                values = _decode_fields(fields, nulls, table_meta, toast)
-                row = {
-                    "ctid": f"({pageno},{pos})",
-                    "values": values,
-                    "deleted": deleted,
-                }
-                yield row
-                count += 1
-                if limit and count >= limit:
-                    return
+            count += 1
+            if limit and count >= limit:
+                return
 
     # ------------------------------------------------------------------
     # SQL 输出
@@ -544,19 +539,27 @@ class HeapFile:
 
     def to_data(self, table_meta, include_deleted=False, only_deleted=False, limit=0,
                 delimiter=",", force=False):
-        """生成 LOAD DATA 格式（CSV 风格）。"""
+        """生成 COPY CSV 格式数据行（与 PG COPY ... WITH (FORMAT csv, NULL '\\N') 兼容）。
+
+        转义规则（PG COPY csv）：
+          - NULL 输出裸 \\N（配合导入时 NULL '\\N' 还原为 NULL）
+          - 值中的反斜杠/tab/换行原样保留（csv 无反斜杠转义）
+          - 含分隔符/换行/引号的字段用双引号包裹，内部引号双写
+          - 字面量恰好为 "\\N" 时也包裹，避免被误判为 NULL
+        """
         for row in self.dump_rows(table_meta, include_deleted, only_deleted, limit, force):
             parts = []
             for v in row["values"]:
-                if v is None:
-                    parts.append("\\N")
-                elif v == "__TOAST_MISSING__":
+                if v is None or v == "__TOAST_MISSING__":
                     parts.append("\\N")
                 else:
-                    s = str(v)
-                    if delimiter in s or "\n" in s or '"' in s:
-                        s = '"' + s.replace('"', '""') + '"'
-                    parts.append(s)
+                    raw = str(v)
+                    needs_quote = (delimiter in raw or "\n" in raw or "\r" in raw
+                                   or '"' in raw or raw == "\\N")
+                    if needs_quote:
+                        parts.append('"' + raw.replace('"', '""') + '"')
+                    else:
+                        parts.append(raw)
             yield delimiter.join(parts)
 
     # ------------------------------------------------------------------

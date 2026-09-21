@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.0
+# version: 2.1
 """
 pg2sql.binary
 二进制基础工具：小端读取、varlena 解析（PG 真实磁盘格式）、TOAST 压缩解压。
@@ -104,9 +104,11 @@ def varlena_parse(b: bytes, off: int = 0):
     total = (word >> 2) & 0x3FFFFFFF
     if total < 4:
         return (None, 0, 0, 0)
-    if (first & 0x03) == 0x00:
-        return (VARLENA_4B, total, off + 4, total - 4)
-    return (VARLENA_4B_COMPRESSED, total, off + 4, total - 4)
+    # PG varatt.h：4B 头低 3 位 010=未压缩(U)、110=内联压缩(C)、100=外联(X)。
+    # 外联指针恒用 1B 头（first==0x01 已在上方判定），此处 U/C 二选一。
+    if (first & 0x06) == 0x06:
+        return (VARLENA_4B_COMPRESSED, total, off + 4, total - 4)
+    return (VARLENA_4B, total, off + 4, total - 4)
 
 
 def parse_external_pointer(b: bytes, off: int = 0):
