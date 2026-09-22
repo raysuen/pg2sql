@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.1
+# version: 2.2
 """
 pg2sql.types
 PostgreSQL 内置类型解码。将字段原始字节解码为可打印/可导入的 SQL 文本值。
@@ -1120,6 +1120,7 @@ DECODERS = {
     CIDOID: decode_cid,
     TIDOID: decode_tid,
     DATEOID: decode_date,
+    8020: decode_timestamp,  # 金仓 oracle DATE：8B 微秒，epoch 2000-01-01（同 PG timestamp）
     TIMEOID: decode_time,
     TIMESTAMPOID: decode_timestamp,
     TIMESTAMPTZOID: decode_timestamptz,

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.8
+# version: 2.9
 """
 pg2sql.catalog
 表结构元数据管理。
@@ -692,14 +692,16 @@ def load_enum_map(db_dir: str, version: int = 0):
       [OID 4B][enumtypid 4B][enumsortorder float4 4B][enumlabel name 64B]
     """
     from .types import set_enum_map
-    from .binary import cstring
+    from .binary import cstring, varlena_parse
     path = os.path.join(db_dir, str(PG_ENUM_RELFILE))
     if not os.path.isfile(path):
         set_enum_map({})
         return
     # pg_enum 是含 oid 用户列的普通表：数据区布局即 [oid][enumtypid][enumsortorder][enumlabel]
     # （勿套 _with_oid，否则 oid 重复、label 偏移错位）
-    layout = [(4, False, "i"), (4, False, "i"), (4, False, "f"), (64, False, "c")]
+    # PG pg_enum.enumlabel 为 name(64B)；金仓 V8 为 varchar(varlena, attlen=-1)，
+    # 统一按 varlena 提取（1B 头 len<<1|1 / 4B 头），兼容两者。
+    layout = [(4, False, "i"), (4, False, "i"), (4, False, "f"), (-1, True, "s")]
     m = {}
     try:
         for _pn, _off, tup in _iter_tuples(path, version or 12, False):
@@ -707,7 +709,12 @@ def load_enum_map(db_dir: str, version: int = 0):
             if not f or len(f) < 4:
                 continue
             enum_typid = struct.unpack("<I", f[1][:4])[0]
-            label = cstring(f[3])
+            label_raw = f[3]
+            if label_raw:
+                _kind, _total, poff, plen = varlena_parse(label_raw)
+                if plen > 0 and poff + plen <= len(label_raw):
+                    label_raw = label_raw[poff:poff + plen]
+            label = cstring(label_raw)
             if not label:
                 continue
             m.setdefault(enum_typid, {})[struct.unpack("<I", f[0][:4])[0]] = label
@@ -1326,7 +1333,7 @@ def _scan_pg_class(path, page_size=8192, version=0):
     version: PG 主版本（0=未知，用 PG12-17 偏移 115；>=18 用 119）。
     """
     import struct as _s
-    from .binary import cstring
+    from .binary import cstring, varlena_parse
 
     results = []
     for pageno, pd_upper, pd_special, raw in _scan_data_region(path, page_size):
@@ -1375,7 +1382,7 @@ def _scan_pg_class(path, page_size=8192, version=0):
 def _scan_pg_namespace(path, page_size=8192):
     """数据区扫描 pg_namespace，返回 {oid: nspname}"""
     import struct as _s
-    from .binary import cstring
+    from .binary import cstring, varlena_parse
 
     result = {}
     for pageno, pd_upper, pd_special, raw in _scan_data_region(path, page_size):
@@ -1426,7 +1433,7 @@ def _scan_pg_attribute(path, target_oid, page_size=8192):
     模式 B (无 OID): 上述
     """
     import struct as _s
-    from .binary import cstring
+    from .binary import cstring, varlena_parse
 
     columns = []
     seen_attnums = set()
@@ -1492,7 +1499,7 @@ def _scan_pg_attribute_all(path, page_size=8192):
     比逐表调用 _scan_pg_attribute 快 N 倍（只遍历一次文件）。
     """
     import struct as _s
-    from .binary import cstring
+    from .binary import cstring, varlena_parse
 
     result = {}
     seen = {}  # attrelid -> set(attnum)，防止 +4 步进在同一元组的错位位置重复匹配

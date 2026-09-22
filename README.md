@@ -3,7 +3,7 @@
 
 > 离线解析 PostgreSQL / 金仓数据库（KingbaseES）堆数据文件并导出为 SQL
 
-> README 版本：v2.6（2026-09-21 全版本 16KB/32KB 闭环验证）
+> README 版本：v2.8（2026-09-22 金仓含中文全类型双路径闭环）
 
 ## 简介
 
@@ -21,12 +21,15 @@ pg2sql 是一个纯 Python 编写的数据库数据文件解析工具，**无需
 
 **Block Size（页大小自动探测，实测矩阵）**
 
-| 版本 | 12 | 13 | 14 | 15 | 16 | 17 | 18 |
+| 版本 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 金仓 V8R6C9B14 |
+|---|---|---|---|---|---|---|---|---|
+| 16KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 32KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 |---|---|---|---|---|---|---|---|
 | 16KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 32KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-全部 14 套（7 版本 × 16KB/32KB）均为：38 列全类型边界表（枚举/数组含 NULL 元素/jsonb 嵌套/inet/macaddr8/几何/±infinity/NaN/含引号换行文本等）→ 导出（自动探测页大小）→ 导入 8KB 实例 → count 与 38 列逐值一致。8KB 全版本（PG12-18）此前已闭环。
+PG12-18 全部 14 套（7 版本 × 16KB/32KB）+ 金仓 V8R6C9B14 的 8/16/32KB 三套均为：38 列全类型边界表（枚举/数组含 NULL 元素/jsonb 嵌套/inet/macaddr8/几何/±infinity/NaN/含引号换行文本等）→ 导出（自动探测页大小）→ 导入 8KB 实例 → count 与 38 列逐值一致。8KB 全版本（PG12-18）此前已闭环。
 
 页大小探测逻辑：读取页头 `pd_pagesize_version`（`size \| version`，`PageGetPageSize = psv & 0xFF00`），在候选集合 {8192, 16384, 32768} 中按 `lower<=upper<=special<=size` 指针链校验后确定，系统目录与 TOAST 文件同链路自动探测，无需 `--page-size` 参数。
 
@@ -277,6 +280,8 @@ SOFTWARE.
 
 ## 变更记录
 
+- **2026-09-22（金仓含中文全类型双路径闭环轮 v2.8）**：金仓 V8R6C9B14 三实例（8/16/32KB）灌入 38 列全类型表 3 行（第 3 行为中文数据：中文 char/varchar/text/name、中文键值 jsonb、中文数组元素、含引号/换行中文文本等），自动探测页大小（8192/16384/32768）→ SQL 与 CSV 双路径导出 → 导入同版本金仓新库（SQL 路径 `psql -f`、CSV 路径 `COPY ... WITH (FORMAT csv, NULL E'\\N')`）→ count=3 且 38 列逐值完全一致。期间实证一条金仓语义差异：**金仓把空 bytea（`''::bytea`）存储为 NULL**（PG 存空串），pg2sql 如实导出 NULL，非解析缺陷；CSV 的 NULL 标记为 `\N`，导入需配 `NULL '\N'`（README 已注明 LOAD DATA 用法）。
+- **2026-09-22（金仓多 Block Size 闭环轮 v2.7）**：用金仓 V8R6C9B14 安装包 initdb 创建 8/16/32KB 三实例（`--block-size=8/16/32`）实测闭环。修复 2 处金仓差异：① types.py 2.1→2.2 `DECODERS[8020]=decode_timestamp`——金仓 oracle 模式 DATE 类型 oid=8020（PG 为 1082），磁盘为 8B 微秒、epoch 2000-01-01（同 PG timestamp 布局），原按未知类型输出原始二进制；② catalog.py 2.8→2.9 `load_enum_map` enumlabel 按 varlena 读取——金仓 `sys_enum.enumlabel` 为 varchar（attlen=-1，1B 头 `len<<1|1`），PG 为 name(64B)，原按定长 64 读取致枚举映射为空、DDL 输出 `"c_mood" oid:16388`。修复后三实例自动探测（8192/16384/32768）→ 导出 → 导入 PG18 → 38 列逐值一致。
 - **2026-09-21（全版本 Block Size 闭环轮 v2.6）**：编译并实测 PG17.11 / PG18.6 的 16KB/32KB 实例（编译环境缺 bison/flex，已源码级安装 GNU Bison 3.8.2 + Flex 2.6.4 至本地 _pgver/local）；连同此前 12-16 版本，**PG12-18 全 7 版本 × 16KB/32KB 共 14 套导出→导入→逐值一致闭环全部通过**（8KB 此前已闭环），页大小自动探测逻辑跨版本无差异（`pd_pagesize_version` 语义 PG12-18 不变）。
 - **2026-09-21（Block Size 自动探测轮 v2.5）**：新增任意页大小自动探测——page.py 1.6→1.7 `detect_page_size(raw)`（`pd_pagesize_version` 语义 + 页内指针链校验，支持 8/16/32KB）；heapfile.py 2.1→2.2 / toast.py 1.9→2.0 `page_size=None` 默认自动探测；catalog.py 2.6→2.7 系统目录探测 + 2.8 `_read_pages` 按探测页大小切页（修复 16KB 实例 pg_enum 被按 8192 切块致枚举映射为空、DDL 输出 `"c_mood" oid:16570` 的缺陷）；main.py 1.20→1.21 `--page-size` 默认 0（自动）。实测闭环：PG12.22 16KB、PG15.19 16KB、PG12.22 32KB 三套（38 列全类型边界表，导出→导入 8KB PG18→逐列值一致）；8KB 回归通过。`--page-size` 仍可显式指定覆盖。
 - **2026-09-21（金仓全表闭环轮 v2.3）**：修复金仓 dropped 列识别错位——catalog.py 2.5→2.6：金仓 V8（PG8.4 代际）与 V9（PG12 代际）实测同用扩展 pg_attribute 固定区（relid..inhcount 共 21 项 + collation），attisdropped 在索引 **17**、attcollation 在 **20**；旧代码沿用 PG12 标准位（16/19），致 V8 `ksh_history_data` 等表 dropped 列泄漏进 DDL（`"........kb.dropped.1........" oid:0` 非法语法）。修复后 V8/V9 全表 DDL 干净。同期完成金仓 5 实例（V8R6C8B14-mysql / V8R6C8B20-ora / V8R6C9B14-ora / V9 test / V9 ray）**全表导出 SQL+CSV+DDL** 与 **导入闭环**（PG18 承载库重建→预建 schema→自动提取预建金仓专属角色→逐表 DROP+导入→count(*) 与 CSV 行数逐表比对）：68/12/23/15/15 表全部一致，仅 v9ray `test01`（pg_class 快照表，relacl 引用源库专属角色 sso_oper 等）因源数据角色特性未闭环，非解析器缺陷；导出失败项均为 information_schema/pg_catalog 系统表（设计过滤）。
