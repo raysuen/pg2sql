@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.9
+# version: 3.0
 """
 pg2sql.catalog
 表结构元数据管理。
@@ -684,12 +684,19 @@ def _iter_tuples(path: str, pg_version: int = 12, is_kingbase: bool = False):
             yield pageno, item.index, tup
 
 
-def load_enum_map(db_dir: str, version: int = 0):
-    """读 base/{db}/3501（pg_enum）构建 {枚举类型 oid: {成员 oid: 标签}}，
-    注入 types.ENUM_MAP 供枚举列解码。文件缺失（如金仓无 pg_enum）时清空映射。
+def load_enum_map(db_dir: str, version: int = 0, is_kingbase: bool = False):
+    """读 base/{db}/3501（pg_enum/sys_enum）构建 {枚举类型 oid: {成员 oid: 标签}}，
+    注入 types.ENUM_MAP 供枚举列解码。文件缺失时清空映射。
 
-    pg_enum 布局各版本一致（PG12-18）：
-      [OID 4B][enumtypid 4B][enumsortorder float4 4B][enumlabel name 64B]
+    enumlabel 列布局（2026-09-22 实测实证）：
+      PG12-18（含金仓外全部）：name 定长 64B（NUL 右填充）——
+        [OID 4B][enumtypid 4B][enumsortorder float4 4B][enumlabel name 64B]
+      KingbaseES V8R6C8B14/V8R6C8B20/V8R6C9B14/V9R1C10：varlena varchar
+        （attlen=-1，实测 V9 各库 sys_attribute 中 enumlabel attlen=-1，
+         V8 早期由 2.9 统一 varlena 方案实证）。
+    必须按 is_kingbase 分支读取：对 PG 的 name(64B) 若走 varlena_parse，
+    首字节为奇数(如 'sad' 0x73)会被误判为 1B varlena 头而丢失首字符
+    （实测 PG18 导出 'sad' 变 'ad'）。
     """
     from .types import set_enum_map
     from .binary import cstring, varlena_parse
@@ -699,18 +706,20 @@ def load_enum_map(db_dir: str, version: int = 0):
         return
     # pg_enum 是含 oid 用户列的普通表：数据区布局即 [oid][enumtypid][enumsortorder][enumlabel]
     # （勿套 _with_oid，否则 oid 重复、label 偏移错位）
-    # PG pg_enum.enumlabel 为 name(64B)；金仓 V8 为 varchar(varlena, attlen=-1)，
-    # 统一按 varlena 提取（1B 头 len<<1|1 / 4B 头），兼容两者。
-    layout = [(4, False, "i"), (4, False, "i"), (4, False, "f"), (-1, True, "s")]
+    if is_kingbase:
+        layout = [(4, False, "i"), (4, False, "i"), (4, False, "f"), (-1, True, "s")]
+    else:
+        layout = [(4, False, "i"), (4, False, "i"), (4, False, "f"), (64, False, "c")]
     m = {}
     try:
-        for _pn, _off, tup in _iter_tuples(path, version or 12, False):
+        for _pn, _off, tup in _iter_tuples(path, version or 12, is_kingbase):
             f = tup.get_fields(layout)
             if not f or len(f) < 4:
                 continue
             enum_typid = struct.unpack("<I", f[1][:4])[0]
             label_raw = f[3]
-            if label_raw:
+            if is_kingbase and label_raw:
+                # 金仓 varlena：解析变长头取数据区
                 _kind, _total, poff, plen = varlena_parse(label_raw)
                 if plen > 0 and poff + plen <= len(label_raw):
                     label_raw = label_raw[poff:poff + plen]

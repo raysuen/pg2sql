@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# version: 1.21
+# version: 1.23
 """
 pg2sql - 离线解析 PostgreSQL 堆数据文件并导出为 SQL
 用法: python3 main.py <data_file> [options]
@@ -214,7 +214,8 @@ def load_metadata(args) -> dict:
         base = os.path.join(args.datadir, "base", str(args.db_oid))
         if not os.path.isdir(base):
             error_exit(f"数据库目录不存在: {base}")
-        load_enum_map(base, detect_pg_version(args.datadir) or 0)
+        load_enum_map(base, detect_pg_version(args.datadir) or 0,
+                      is_kingbase_datadir(args.datadir))
         meta = auto_discover_all_tables(base, page_size=args.page_size)
         if args.verbose:
             log(f"从数据目录自动发现元数据: {len(meta['tables'])} 个表")
@@ -226,7 +227,8 @@ def load_metadata(args) -> dict:
         if os.path.isfile(data_file):
             try:
                 load_enum_map(os.path.dirname(data_file), detect_pg_version(
-                    os.path.dirname(os.path.dirname(data_file))) or 0)
+                    os.path.dirname(os.path.dirname(data_file))) or 0,
+                    is_kingbase_datadir(os.path.dirname(data_file)))
                 meta = auto_discover_meta(data_file, page_size=args.page_size)
                 if args.verbose:
                     tm = list(meta["tables"].values())[0]
@@ -241,7 +243,8 @@ def load_metadata(args) -> dict:
         elif os.path.isdir(data_file):
             # datafile 是数据库目录 (如 base/16384/)
             load_enum_map(data_file, detect_pg_version(
-                os.path.dirname(os.path.dirname(data_file))) or 0)
+                os.path.dirname(os.path.dirname(data_file))) or 0,
+                is_kingbase_datadir(data_file))
             meta = auto_discover_all_tables(data_file, page_size=args.page_size)
             if args.verbose:
                 log(f"从数据库目录自动发现元数据: {len(meta['tables'])} 个表")
@@ -824,7 +827,12 @@ def run_parallel(args, meta, table_meta):
                     parts.append("\\N")
                 else:
                     s = str(v)
-                    if args.delimiter in s or "\n" in s or '"' in s:
+                    # 与 heapfile.to_data 的 CSV 转义规则保持一致：
+                    # 含分隔符/换行/回车/引号或字面量恰好为 "\N" 的字段必须加引号包裹
+                    # （缺 \r 检测会导致 COPY 导入把回车当行分隔符；缺 \N 特判会把
+                    #  字面 "\N" 误判为 NULL——均会造成数据损坏）
+                    if args.delimiter in s or "\n" in s or "\r" in s or '"' in s \
+                            or s == "\\N":
                         s = '"' + s.replace('"', '""') + '"'
                     parts.append(s)
             out_fp.write(args.delimiter.join(parts) + "\n")

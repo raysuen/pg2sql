@@ -1,9 +1,8 @@
-
 # pg2sql
 
 > 离线解析 PostgreSQL / 金仓数据库（KingbaseES）堆数据文件并导出为 SQL
 
-> README 版本：v2.8（2026-09-22 金仓含中文全类型双路径闭环）
+> README 版本：v3.1（2026-09-22 CSV 转义双路径统一修复 + 全版本 4 行边界回归）
 
 ## 简介
 
@@ -280,6 +279,10 @@ SOFTWARE.
 
 ## 变更记录
 
+- **2026-09-22（CSV 转义双路径统一修复 + 全版本边界回归轮 v3.1）**：发现并行模式（`--parallel>1`）的 CSV 写入与默认路径转义规则不一致——缺 `\r`（回车）检测与字面 `\N` 特判，字段含单独回车会破坏 COPY 行结构、字面 `\N` 会被误判为 NULL。修复 main.py 1.22→1.23：`_write_row` 对齐 `heapfile.to_data()` 规则（含分隔符/换行/回车/引号或恰好为 `\N` 的字段一律双引号包裹、内部引号双写）。fixture 增至 4 行（新增 CSV 边界行：单独 `\r` 字段、字面 `\N`、空串 vs NULL、含逗号+引号+回车的数组元素、json 空字符串）→ PG12-18 × 16KB/32KB 14 套 + 金仓 8/16/32KB 3 套全部"导出→同版本导入→三库 38 列逐值一致"；并行 CSV 与默认 CSV 导入值逐行一致（`c_varchar='A\rB'` 回车无损、`c_text='\N'` 保留字面非 NULL）。该修复为纯输出逻辑，金仓与 PG 各版本通用。
+- **2026-09-22（PG12-18 非默认表空间全版本闭环轮 v3.0）**：PG12-18 × 16KB/32KB 共 14 套实例，`CREATE TABLESPACE pts LOCATION '<数据目录外路径>'`，38 列全类型表置于表空间（`pg_tblspc/{oid}` 符号链接指向 `PG_{ver}_.../{dboid}/{relfilenode}`），灌入 3 行（第 3 行含中英文特殊字符：单引号/双引号/反斜杠/换行/制表/回车/`%&$#@!?;--`/中文全角标点/emoji，jsonb/json 中文键值）→ 自动探测页大小 → SQL 与 CSV 双路径导出 → 导入**同版本**新库 → 38 列逐值一致。
+- **修复：enum label 版本感知（catalog.py 2.9→3.0、main.py 1.21→1.22）**：PG 的 `pg_enum.enumlabel` 是 name 定长 64B（NUL 右填充），金仓（V8R6C8B14/V8R6C8B20/V8R6C9B14/V9R1C10）是 varlena varchar（实测 V9 各库 sys_attribute 中 enumlabel attlen=-1）。此前统一按 varlena 提取，PG 的 name 首字节为奇数（如 `'sad'` 0x73）被误判为 1B 变长头而丢失首字符（实测导出 `'sad'` 变 `'ad'`）。修复后 `load_enum_map` 按 `is_kingbase` 分支选择布局与提取方式，PG 全版本 14 套表空间闭环三库逐值一致（含 enum `'sad'` 无损）。
+- **2026-09-22（金仓非默认表空间闭环轮 v2.9）**：金仓 V8R6C9B14 三实例（8/16/32KB）`CREATE TABLESPACE kbts LOCATION '<数据目录外路径>'`，38 列全类型表置于表空间（物理文件在 `sys_tblspc/{oid}` 符号链接指向的 `SYS_12_202404121/{dboid}/{relfilenode}`），灌入 3 行（第 3 行含中英文特殊字符：单引号/双引号/反斜杠/换行/制表/回车/`%&$#@!?;--`/中文全角标点/emoji）。pg2sql 直接以表空间物理文件为 datafile（`--datadir` 指向数据目录取元数据）→ 自动探测页大小（8192/16384/32768）→ SQL 与 CSV 双路径导出 → 导入同版本金仓新库 → count=3 且 38 列逐值一致，特殊字符（含 emoji、`引号"和反斜杠\`）三库无损。
 - **2026-09-22（金仓含中文全类型双路径闭环轮 v2.8）**：金仓 V8R6C9B14 三实例（8/16/32KB）灌入 38 列全类型表 3 行（第 3 行为中文数据：中文 char/varchar/text/name、中文键值 jsonb、中文数组元素、含引号/换行中文文本等），自动探测页大小（8192/16384/32768）→ SQL 与 CSV 双路径导出 → 导入同版本金仓新库（SQL 路径 `psql -f`、CSV 路径 `COPY ... WITH (FORMAT csv, NULL E'\\N')`）→ count=3 且 38 列逐值完全一致。期间实证一条金仓语义差异：**金仓把空 bytea（`''::bytea`）存储为 NULL**（PG 存空串），pg2sql 如实导出 NULL，非解析缺陷；CSV 的 NULL 标记为 `\N`，导入需配 `NULL '\N'`（README 已注明 LOAD DATA 用法）。
 - **2026-09-22（金仓多 Block Size 闭环轮 v2.7）**：用金仓 V8R6C9B14 安装包 initdb 创建 8/16/32KB 三实例（`--block-size=8/16/32`）实测闭环。修复 2 处金仓差异：① types.py 2.1→2.2 `DECODERS[8020]=decode_timestamp`——金仓 oracle 模式 DATE 类型 oid=8020（PG 为 1082），磁盘为 8B 微秒、epoch 2000-01-01（同 PG timestamp 布局），原按未知类型输出原始二进制；② catalog.py 2.8→2.9 `load_enum_map` enumlabel 按 varlena 读取——金仓 `sys_enum.enumlabel` 为 varchar（attlen=-1，1B 头 `len<<1|1`），PG 为 name(64B)，原按定长 64 读取致枚举映射为空、DDL 输出 `"c_mood" oid:16388`。修复后三实例自动探测（8192/16384/32768）→ 导出 → 导入 PG18 → 38 列逐值一致。
 - **2026-09-21（全版本 Block Size 闭环轮 v2.6）**：编译并实测 PG17.11 / PG18.6 的 16KB/32KB 实例（编译环境缺 bison/flex，已源码级安装 GNU Bison 3.8.2 + Flex 2.6.4 至本地 _pgver/local）；连同此前 12-16 版本，**PG12-18 全 7 版本 × 16KB/32KB 共 14 套导出→导入→逐值一致闭环全部通过**（8KB 此前已闭环），页大小自动探测逻辑跨版本无差异（`pd_pagesize_version` 语义 PG12-18 不变）。
