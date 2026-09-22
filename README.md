@@ -1,8 +1,9 @@
+
 # pg2sql
 
 > 离线解析 PostgreSQL / 金仓数据库（KingbaseES）堆数据文件并导出为 SQL
 
-> README 版本：v3.2（2026-09-22 代码审核轮：list 命令页大小自动探测等 4 处健壮性修复 + 全版本回归）
+> README 版本：v3.3（2026-09-22 库编码自动探测与字节可逆解码轮：金仓 V9 MySQL 0x9B 导入报错修复 + 全版本回归）
 
 ## 简介
 
@@ -122,8 +123,9 @@ python3 main.py -h    # 查看完整帮助
 | **高级选项** | |
 | `--toast FILE` | TOAST 表文件路径（重组大字段） |
 | `--toast-cache MODE` | TOAST 缓存模式：light（默认）/ full（全内存，慢磁盘提速） |
-| `--page-size N` | 页面大小（默认 8192） |
+| `--page-size N` | 页面大小（默认自动探测；显式指定可覆盖） |
 | `--parallel N` | 并发进程数 |
+| `--encoding CODEC` | 覆盖库编码（Python codec 名，如 `utf-8`/`latin-1`/`gbk`/`gb18030`；默认从 `global/1262` 自动探测） |
 | `--verbose` | 输出详细日志 |
 
 ### 并发模式与大文件性能（v1.15）
@@ -279,6 +281,7 @@ SOFTWARE.
 
 ## 变更记录
 
+- **2026-09-22（库编码自动探测与字节可逆解码轮 v3.3，main.py 1.24→1.25、binary.py 2.1→2.2、types.py 2.3→2.4、catalog.py 3.0→3.2）**：金仓 V9 MySQL 模式 50 列大表（`ray.test_50col_old`，TOAST 61,361 页）导出 SQL 导入报 `ERROR: invalid byte sequence for encoding "UTF8": 0x9b`。根因：**非 UTF-8 源库文本一律按 utf-8/replace 输出**——LATIN1 库 0x9B 等字节被替换为 U+FFFD（数据损坏），且旧版部分路径写入裸字节导致导入非法。修复：① catalog.py 新增 `detect_database_encoding()`——从 `global/1262` 解析 pg_database 元组按库 OID 探测 `datencoding`，ID→codec 映射表按 **PG12-18 各版本源码 `pg_wchar.h` 的 `pg_enc` 权威枚举逐一核对**（UTF8=6、LATIN1=8、GB18030=40、GBK=38…，7 个版本完全一致）；② 新增 `--encoding CODEC` 命令行覆盖；③ binary.py `decode_bytes`/`cstring` 按库编码解码，strict 解码失败时**逐字节 latin-1 兜底**（0x9B→U+009B→UTF-8 `C2 9B`，导出文件恒为合法 UTF-8 且字节无损可逆）。调试实证修正本轮的 4B 偏移：1262 元组 encoding 字段在 `t_hoff+76`，原 layout 用 2 元组 `(64,'c')` 被 `_extract_fields_direct` 误判为 varlena 列导致错位，已按 3 元组 `(attlen, is_varlena, attalign)` 修正。验证：PG16 LATIN1 库 `0x9B 0x81 0x9B`→导出→导入 UTF8 库字节一致（`C2 9B` 无损）；**金仓 V9 MySQL 用户报错库**（base/24576/41008，50 列，2,591,126 个 TOAST valueid）自动探测 utf-8→导出 SQL 全 UTF-8 合法（原 10955 行 0x9B 消除）；PG12-18 × 16KB/32KB 14 套 + 金仓 V8R6C9B14 8/16/32KB 3 套"导出→同版本导入→逐值一致"闭环全 PASS、`--list-tables` 14 套 PASS、并行 CSV 与串行 CSV 逐字节一致。
 - **2026-09-22（代码审核轮 v3.2，main.py 1.23→1.24、types.py 2.2→2.3）**：全量通读 9 个源码文件后修复 4 处健壮性/逻辑问题——① **`--list-db`/`--list-tables-db` 辅助命令硬编码 8192 页大小**：16KB/32KB 实例上 `_is_pg_class_content`/`_is_pg_database_content`/`_parse_pg_database`/`_parse_pg_class`/`_parse_pg_class_raw_scan` 用固定 8192 读页，Page 长度校验失败导致数据库名/表名解析为空（仅显示 OID）。修复：上述路径全部改为 `_probe_file_page_size()` 页大小自动探测；② **并行 CSV 路径 `_write_row` 缺 `__TOAST_MISSING__` 特判**：与单进程 `heapfile.to_data()` 不一致（TOAST chunk 缺失时并行输出字面字符串、单进程输出 `\N`）。修复：两者一致输出 `\N`（NULL）；③ **`--deleted --count` 忽略 deleted 标志**：count 模式只统计活行。修复：`include_deleted = deleted or only_deleted`；④ **`decode_money` 用浮点除法**：int64 微元 `/100` 转 float，>2^53/100 微元时精度损失（实测 `9223372036854775807` 微元旧实现输出 `92233720368547760.00`）。修复：整数整除 + 补零。回归：PG12-18 × 16KB/32KB 14 套 + 金仓 V8R6C9B14 8/16/32KB 3 套全部"导出→同版本导入→三库逐值一致"闭环通过；`--list-db`/`--list-tables-db` 全 17 套名称解析 PASS；并行 CSV 与默认 CSV 逐字节一致；`--deleted --count`=活行+删除行（修复前漏删除行）。
 - **2026-09-22（CSV 转义双路径统一修复 + 全版本边界回归轮 v3.1）**：发现并行模式（`--parallel>1`）的 CSV 写入与默认路径转义规则不一致——缺 `\r`（回车）检测与字面 `\N` 特判，字段含单独回车会破坏 COPY 行结构、字面 `\N` 会被误判为 NULL。修复 main.py 1.22→1.23：`_write_row` 对齐 `heapfile.to_data()` 规则（含分隔符/换行/回车/引号或恰好为 `\N` 的字段一律双引号包裹、内部引号双写）。fixture 增至 4 行（新增 CSV 边界行：单独 `\r` 字段、字面 `\N`、空串 vs NULL、含逗号+引号+回车的数组元素、json 空字符串）→ PG12-18 × 16KB/32KB 14 套 + 金仓 8/16/32KB 3 套全部"导出→同版本导入→三库 38 列逐值一致"；并行 CSV 与默认 CSV 导入值逐行一致（`c_varchar='A\rB'` 回车无损、`c_text='\N'` 保留字面非 NULL）。该修复为纯输出逻辑，金仓与 PG 各版本通用。
 - **2026-09-22（PG12-18 非默认表空间全版本闭环轮 v3.0）**：PG12-18 × 16KB/32KB 共 14 套实例，`CREATE TABLESPACE pts LOCATION '<数据目录外路径>'`，38 列全类型表置于表空间（`pg_tblspc/{oid}` 符号链接指向 `PG_{ver}_.../{dboid}/{relfilenode}`），灌入 3 行（第 3 行含中英文特殊字符：单引号/双引号/反斜杠/换行/制表/回车/`%&$#@!?;--`/中文全角标点/emoji，jsonb/json 中文键值）→ 自动探测页大小 → SQL 与 CSV 双路径导出 → 导入**同版本**新库 → 38 列逐值一致。

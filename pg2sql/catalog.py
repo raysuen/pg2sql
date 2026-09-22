@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 3.0
+# version: 3.2
 """
 pg2sql.catalog
 表结构元数据管理。
@@ -39,6 +39,57 @@ PG_NAMESPACE_OID = 2615
 # 系统目录在数据目录中的文件位置
 PG_CLASS_RELFILE = 1259
 PG_ATTRIBUTE_RELFILE = 1249
+PG_DATABASE_RELFILE = 1262
+
+# v3.2: PG 库编码 ID → Python codec（pg_wchar.h pg_enc 权威枚举，
+# PG12-18 完全一致，已对 7 个版本源码逐一核对；探测不到/未知 → None）
+PG_ENCODING_ID_TO_CODEC = {
+    0: "latin-1",    # SQL_ASCII：任意字节，latin-1 逐字节可逆
+    1: "euc_jp", 2: "euc_cn", 3: "euc_kr", 4: "euc_tw",
+    5: "euc_jp",     # EUC_JIS_2004
+    6: "utf-8",      # UTF8 / UNICODE
+    7: "latin-1",    # MULE_INTERNAL
+    8: "latin-1", 9: "latin-2", 10: "latin-3", 11: "latin-4",
+    12: "latin-5", 13: "latin-6", 14: "latin-7", 15: "latin-8",
+    16: "latin-9", 17: "latin-10",
+    18: "cp1256", 19: "cp1258", 20: "cp866", 21: "cp874",
+    22: "koi8-r", 23: "cp1251", 24: "cp1252",
+    25: "iso8859-5", 26: "iso8859-6", 27: "iso8859-7", 28: "iso8859-8",
+    29: "cp1250", 30: "cp1253", 31: "cp1254", 32: "cp1255", 33: "cp1257",
+    34: "koi8-u",
+    36: "shift_jis", 37: "big5", 38: "gbk", 39: "cp949",
+    40: "gb18030", 41: "johab", 42: "shift_jis",
+}
+
+
+def detect_database_encoding(datadir: str, db_oid: int):
+    """从 global/pg_database(1262) 探测指定库的字符编码，返回 python codec 名或 None。
+
+    布局：PG12+ [OID 4B] + 用户列 datname(0) name / datdba(1) oid / encoding(2) int4。
+    金仓沿用 PG 布局（SYS_VERSION 数据目录同样适用）。
+    """
+    if not datadir or not db_oid:
+        return None
+    f = os.path.join(datadir, "global", str(PG_DATABASE_RELFILE))
+    if not os.path.isfile(f):
+        return None
+    try:
+        version = detect_pg_version(datadir) or 16
+        is_kb = is_kingbase_datadir(datadir)
+        layout = _with_oid([(64, False, "c"), (4, False, "i"), (4, False, "i")])  # oid, datname, datdba, encoding
+        for _, _, tup in _iter_tuples(f, version, is_kb):
+            fields = tup.get_fields(layout)
+            if not fields or len(fields) < 4 or not fields[0]:
+                continue
+            if struct.unpack("<I", fields[0][:4])[0] != db_oid:
+                continue
+            if not fields[3] or len(fields[3]) < 4:
+                return None
+            enc_id = struct.unpack("<i", fields[3][:4])[0]
+            return PG_ENCODING_ID_TO_CODEC.get(enc_id)
+    except Exception:
+        return None
+    return None
 PG_TYPE_RELFILE = 1247
 PG_ENUM_RELFILE = 3501  # pg_enum（各版本固定）
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# version: 1.24
+# version: 1.25
 """
 pg2sql - 离线解析 PostgreSQL 堆数据文件并导出为 SQL
 用法: python3 main.py <data_file> [options]
@@ -180,6 +180,10 @@ def build_parser():
                            help="页面大小 (默认 0=自动探测页头编码; 可显式指定 8192/16384/32768)")
     adv_group.add_argument("--parallel", type=int, default=0, metavar="N",
                            help="并发进程数 (大文件加速, 0=单进程)")
+    adv_group.add_argument("--encoding", default="auto", metavar="CODEC",
+                           help="源库字符编码 (默认 auto=从 global/pg_database 自动探测; "
+                                "非 UTF-8 库如 LATIN1/GB18030/GBK/SQL_ASCII 可显式指定, "
+                                "如 --encoding gbk)")
     adv_group.add_argument("--verbose", action="store_true", default=False,
                            help="输出详细日志到 stderr")
 
@@ -189,6 +193,33 @@ def build_parser():
 # ======================================================================
 # 核心逻辑
 # ======================================================================
+
+def _configure_encoding(args) -> None:
+    """设置库文本解码编码（v1.25）。
+
+    优先级：用户显式 --encoding > 自动探测（global/pg_database 的 datencoding）> UTF-8。
+    探测失败或未知编码 ID 时保持默认 UTF-8（写文件始终 UTF-8，不会产生非法字节）。
+    """
+    from pg2sql.binary import set_text_encoding
+    if getattr(args, "encoding", "auto") and args.encoding != "auto":
+        try:
+            set_text_encoding(args.encoding)
+            return
+        except Exception:
+            pass
+    datadir = getattr(args, "datadir", None)
+    db_oid = getattr(args, "db_oid", None)
+    if not datadir and getattr(args, "datafile", None):
+        # 从数据文件路径反推数据目录（base/{dboid}/file 或表空间外文件）
+        db_dir = os.path.dirname(os.path.abspath(args.datafile))
+        cand = os.path.dirname(db_dir)
+        if os.path.isfile(os.path.join(cand, "global", "1262")):
+            datadir = cand
+    if datadir and db_oid:
+        from pg2sql.catalog import detect_database_encoding
+        enc = detect_database_encoding(datadir, int(db_oid))
+        if enc:
+            set_text_encoding(enc)
 
 def load_metadata(args) -> dict:
     """加载元数据, 返回 {"database": str, "tables": {name: TableMeta}}。
@@ -1541,6 +1572,9 @@ def main():
     # --page-size 0 = 自动探测（页头 pd_pagesize_version 编码）
     if args.page_size == 0:
         args.page_size = None
+
+    # v1.25: 库文本编码设置（auto=自动探测, 或用户显式 --encoding）
+    _configure_encoding(args)
 
     # 无任何参数时显示帮助
     if len(sys.argv) == 1:

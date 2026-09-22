@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.3
+# version: 2.4
 """
 pg2sql.types
 PostgreSQL 内置类型解码。将字段原始字节解码为可打印/可导入的 SQL 文本值。
@@ -20,7 +20,7 @@ import uuid as _uuid
 
 from .binary import (
     cstring, hexstr, varlena_parse, parse_external_pointer,
-    toast_decompress,
+    toast_decompress, decode_bytes,
     VARLENA_1B, VARLENA_4B, VARLENA_4B_COMPRESSED, VARLENA_EXTERNAL,
 )
 
@@ -298,7 +298,7 @@ def _fmt_float(v: float) -> str:
 
 def _decode_varlena_text(b: bytes) -> str:
     payload, _, _ = _var(b)
-    return payload.decode("utf-8", errors="replace")
+    return decode_bytes(payload)
 
 
 def decode_text(b: bytes) -> str:
@@ -578,7 +578,7 @@ def _jsonb_scalar_to_text(je, payload, data_off, s, e):
     """单个 jsonb 标量/容器 → JSON 文本。data 区域为 payload[data_off+s : data_off+e]。"""
     t = je & JENTRY_TYPEMASK
     if t == 0:  # string
-        return json.dumps(payload[data_off + s:data_off + e].decode("utf-8", errors="replace"),
+        return json.dumps(decode_bytes(payload[data_off + s:data_off + e]),
                           ensure_ascii=False)
     if t == JENTRY_ISNUMERIC:
         vp, _, _ = _var_payload(payload[data_off + ((s + 3) & ~3):data_off + e])
@@ -640,8 +640,7 @@ def _jsonb_container_to_text(payload: bytes) -> str:
         val_off = get_offset(count)  # 值区起点 = 键区累计终点
         for i in range(count):
             klen = jlen(i)
-            key = payload[data_off + key_off:data_off + key_off + klen].decode(
-                "utf-8", errors="replace")
+            key = decode_bytes(payload[data_off + key_off:data_off + key_off + klen])
             vs = get_offset(count + i)
             v = _jsonb_scalar_to_text(ents[count + i], payload, data_off, vs, vs + jlen(count + i))
             pairs.append((key, v))
@@ -771,10 +770,10 @@ def _array_elem_text(payload: bytes, pos: int, elem_oid: int):
         first = payload[pos]
         if first & 1:
             total = first >> 1
-            return (payload[pos + 1:pos + total].decode("utf-8", errors="replace"),
+            return (decode_bytes(payload[pos + 1:pos + total]),
                     pos + total)
         total = struct.unpack_from("<I", payload, pos)[0] >> 2
-        return (payload[pos + 4:pos + total].decode("utf-8", errors="replace"),
+        return (decode_bytes(payload[pos + 4:pos + total]),
                 pos + total)
     alen, aalign, fn = info
     if alen == -1:
@@ -785,13 +784,13 @@ def _array_elem_text(payload: bytes, pos: int, elem_oid: int):
         if first & 1:  # 1B 短头（历史/金仓数据可能保留，紧凑存放）
             total = first >> 1
             seg = payload[pos + 1:pos + total]
-            return ((fn(seg) if fn else seg.decode("utf-8", errors="replace")), pos + total)
+            return ((fn(seg) if fn else decode_bytes(seg)), pos + total)
         a = ALIGN_SIZES.get(aalign, 4)
         if a > 1 and pos % a != 0:
             pos = (pos + a - 1) & ~(a - 1)
         total = struct.unpack_from("<I", payload, pos)[0] >> 2
         seg = payload[pos + 4:pos + total]
-        return ((fn(seg) if fn else seg.decode("utf-8", errors="replace")), pos + total)
+        return ((fn(seg) if fn else decode_bytes(seg)), pos + total)
     # 固定长度元素：att_align_nominal
     a = ALIGN_SIZES.get(aalign, 1)
     if a > 1:
@@ -799,7 +798,7 @@ def _array_elem_text(payload: bytes, pos: int, elem_oid: int):
     seg = payload[pos:pos + alen]
     if fn:
         return (fn(seg), pos + alen)
-    return (seg.decode("utf-8", errors="replace"), pos + alen)
+    return (decode_bytes(seg), pos + alen)
 
 
 def decode_array(b: bytes) -> str:
@@ -1037,7 +1036,7 @@ def decode_char(b: bytes) -> str:
 
 
 def decode_unknown(b: bytes) -> str:
-    return b.decode("utf-8", errors="replace")
+    return decode_bytes(b)
 
 
 def decode_pg_node_tree(b: bytes) -> str:

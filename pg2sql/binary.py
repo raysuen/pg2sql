@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.1
+# version: 2.2
 """
 pg2sql.binary
 二进制基础工具：小端读取、varlena 解析（PG 真实磁盘格式）、TOAST 压缩解压。
@@ -12,6 +12,36 @@ v2.0 重写（对照 PostgreSQL varatt.h / pg_lzcompress.c 与 pg_filedump/PDU�
   - 删除旧版大端虚构格式死代码（get_varlena_payload/detoast_external）
 """
 import struct
+
+# v2.2: 库文本编码（由 main.py 按库探测/--encoding 设置）。
+# 默认 UTF-8；非 UTF-8 库（LATIN1/GB18030/GBK/SQL_ASCII 等）按库编码解码，
+# 解码失败字节回退 latin-1（逐字节 0x00-0xFF 均可逆，不产生 � 数据损坏）。
+_TEXT_ENCODING = "utf-8"
+
+
+def set_text_encoding(enc: str) -> None:
+    """设置全库文本解码编码（main.py 入口调用）。"""
+    global _TEXT_ENCODING
+    _TEXT_ENCODING = enc or "utf-8"
+
+
+def get_text_encoding() -> str:
+    return _TEXT_ENCODING
+
+
+def decode_bytes(raw: bytes) -> str:
+    """按库编码解码字节；失败时 latin-1 逐字节兜底（字节可逆，绝不丢失）。
+
+    返回的 str 以 UTF-8 语义写入输出文件（main.py 统一 utf-8 写文件），
+    因此输出文件永远是合法 UTF-8；无法解码的源字节（如非法 UTF-8 残留）
+    映射为对应 U+0080-U+00FF 字符（UTF-8 编码 0xC2 0x80-0xC3 0xBF），
+    PostgreSQL/金仓 UTF8 库可导入（实测 U+009B 等 C1 控制字符被接受）。
+    """
+    enc = _TEXT_ENCODING
+    try:
+        return raw.decode(enc)
+    except (UnicodeDecodeError, LookupError):
+        return raw.decode("latin-1")
 
 
 def u16(b: bytes, off: int = 0) -> int:
@@ -38,15 +68,11 @@ def i64(b: bytes, off: int = 0) -> int:
 
 
 def cstring(b: bytes, off: int = 0) -> str:
-    """读取 C 风格以 NUL 结尾的字符串（按 UTF-8 解码，失败时用 latin-1）"""
+    """读取 C 风格以 NUL 结尾的字符串（按库编码解码，失败时 latin-1 逐字节兜底）"""
     end = b.find(b"\x00", off)
     if end < 0:
         end = len(b)
-    raw = b[off:end]
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return raw.decode("latin-1")
+    return decode_bytes(b[off:end])
 
 
 def hexstr(b: bytes) -> str:
