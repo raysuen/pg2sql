@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# version: 1.23
+# version: 1.24
 """
 pg2sql - 离线解析 PostgreSQL 堆数据文件并导出为 SQL
 用法: python3 main.py <data_file> [options]
@@ -498,8 +498,10 @@ def run(args):
 
     # --- --count 模式 ---
     if args.count:
+        # v1.24: --deleted --count 组合应统计删除行（原实现只认 only_deleted）
         count = 0
-        for row in hf.dump_rows(table_meta, include_deleted=args.only_deleted,
+        for row in hf.dump_rows(table_meta,
+                                include_deleted=args.deleted or args.only_deleted,
                                 only_deleted=args.only_deleted, limit=0):
             count += 1
         fp = _get_out_file("sql")
@@ -823,7 +825,8 @@ def run_parallel(args, meta, table_meta):
         if args.data:
             parts = []
             for v in values:
-                if v is None:
+                # v1.24: __TOAST_MISSING__ 与单进程 to_data 一致输出 \N（NULL）
+                if v is None or v == "__TOAST_MISSING__":
                     parts.append("\\N")
                 else:
                     s = str(v)
@@ -1028,15 +1031,18 @@ def _parse_pg_database(path: str, verbose: bool = False) -> dict:
 
     version = detect_pg_version(os.path.dirname(os.path.abspath(path))) or 16
     result = {}
+    # v1.24: 页大小自动探测（16KB/32KB 实例的 global/pg_database 用页头编码，
+    # 硬编码 8192 会导致 Page 长度校验失败、数据库名解析为空）
+    page_size = _probe_file_page_size(path)
     filesize = os.path.getsize(path)
-    npages = filesize // PAGE_SIZE
+    npages = filesize // page_size
 
     with open(path, "rb") as f:
         for pageno in range(npages):
-            raw = f.read(PAGE_SIZE)
-            if len(raw) < PAGE_SIZE:
+            raw = f.read(page_size)
+            if len(raw) < page_size:
                 break
-            page = Page(pageno, raw)
+            page = Page(pageno, raw, page_size=page_size)
             if not page.has_valid_layout:
                 continue
             for item in page.items:
@@ -1208,18 +1214,20 @@ def _parse_pg_class(path: str, verbose: bool = False) -> tuple:
     names = {}
     relfilenodes = {}
 
+    # v1.24: 页大小自动探测（16KB/32KB 实例 pg_class）
+    page_size = _probe_file_page_size(path)
     filesize = os.path.getsize(path)
-    npages = filesize // PAGE_SIZE
+    npages = filesize // page_size
 
     # ===== 阶段 1: 通过页头 + ItemId 解析 =====
     page_ok = 0
     item_ok = 0
     with open(path, "rb") as f:
         for pageno in range(npages):
-            raw = f.read(PAGE_SIZE)
-            if len(raw) < PAGE_SIZE:
+            raw = f.read(page_size)
+            if len(raw) < page_size:
                 break
-            page = Page(pageno, raw)
+            page = Page(pageno, raw, page_size=page_size)
             if not page.has_valid_layout:
                 if verbose and pageno == 0:
                     log(f"  page 0 解析失败: {page.error}")
@@ -1270,20 +1278,22 @@ def _parse_pg_class_raw_scan(path: str, version: int = 0, verbose: bool = False)
     names = {}
     relfilenodes = {}
 
+    # v1.24: 页大小自动探测（16KB/32KB 实例 pg_class 扫描路径）
+    page_size = _probe_file_page_size(path)
     filesize = os.path.getsize(path)
-    npages = filesize // PAGE_SIZE
+    npages = filesize // page_size
 
     with open(path, "rb") as f:
         for pageno in range(npages):
-            raw = f.read(PAGE_SIZE)
-            if len(raw) < PAGE_SIZE:
+            raw = f.read(page_size)
+            if len(raw) < page_size:
                 break
-            page = Page(pageno, raw)
+            page = Page(pageno, raw, page_size=page_size)
             if not page.has_valid_layout:
                 continue
 
             pd_upper = page.header.get("upper", 0)
-            pd_special = page.header.get("special", PAGE_SIZE)
+            pd_special = page.header.get("special", page_size)
             if pd_upper < page.header_size or pd_upper >= pd_special:
                 continue
 
@@ -1436,13 +1446,16 @@ def _is_pg_class_content(path, verbose=False):
     match_count = 0
     total_checked = 0
 
+    # v1.24: 页大小自动探测（16KB/32KB 实例）
+    page_size = _probe_file_page_size(path)
+
     with open(path, "rb") as f:
         # 只读前 2 页即可判断
         for pageno in range(2):
-            raw = f.read(PAGE_SIZE)
-            if len(raw) < PAGE_SIZE:
+            raw = f.read(page_size)
+            if len(raw) < page_size:
                 break
-            page = Page(pageno, raw)
+            page = Page(pageno, raw, page_size=page_size)
             if not page.has_valid_layout:
                 continue
             for item in page.items:
@@ -1483,12 +1496,15 @@ def _is_pg_database_content(path, verbose=False):
     match_count = 0
     total_checked = 0
 
+    # v1.24: 页大小自动探测（16KB/32KB 实例）
+    page_size = _probe_file_page_size(path)
+
     with open(path, "rb") as f:
         for pageno in range(2):
-            raw = f.read(PAGE_SIZE)
-            if len(raw) < PAGE_SIZE:
+            raw = f.read(page_size)
+            if len(raw) < page_size:
                 break
-            page = Page(pageno, raw)
+            page = Page(pageno, raw, page_size=page_size)
             if not page.has_valid_layout:
                 continue
             for item in page.items:

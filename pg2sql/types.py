@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.2
+# version: 2.3
 """
 pg2sql.types
 PostgreSQL 内置类型解码。将字段原始字节解码为可打印/可导入的 SQL 文本值。
@@ -951,8 +951,12 @@ def decode_bit(b: bytes) -> str:
 
 
 def decode_money(b: bytes) -> str:
+    # v2.3: 整数除法避免大金额浮点精度损失（int64 微元 / 100 转 float
+    # 在 >2^53/100 微元时精度丢失；PG money 最大 ~9.2e18 微元）
     v = struct.unpack("<q", b[:8])[0]
-    return f"{v / 100:.2f}"
+    sign = "-" if v < 0 else ""
+    v = abs(v)
+    return f"{sign}{v // 100}.{v % 100:02d}"
 
 
 # --------------------------------------------------------------------------

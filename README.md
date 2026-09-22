@@ -2,7 +2,7 @@
 
 > 离线解析 PostgreSQL / 金仓数据库（KingbaseES）堆数据文件并导出为 SQL
 
-> README 版本：v3.1（2026-09-22 CSV 转义双路径统一修复 + 全版本 4 行边界回归）
+> README 版本：v3.2（2026-09-22 代码审核轮：list 命令页大小自动探测等 4 处健壮性修复 + 全版本回归）
 
 ## 简介
 
@@ -279,6 +279,7 @@ SOFTWARE.
 
 ## 变更记录
 
+- **2026-09-22（代码审核轮 v3.2，main.py 1.23→1.24、types.py 2.2→2.3）**：全量通读 9 个源码文件后修复 4 处健壮性/逻辑问题——① **`--list-db`/`--list-tables-db` 辅助命令硬编码 8192 页大小**：16KB/32KB 实例上 `_is_pg_class_content`/`_is_pg_database_content`/`_parse_pg_database`/`_parse_pg_class`/`_parse_pg_class_raw_scan` 用固定 8192 读页，Page 长度校验失败导致数据库名/表名解析为空（仅显示 OID）。修复：上述路径全部改为 `_probe_file_page_size()` 页大小自动探测；② **并行 CSV 路径 `_write_row` 缺 `__TOAST_MISSING__` 特判**：与单进程 `heapfile.to_data()` 不一致（TOAST chunk 缺失时并行输出字面字符串、单进程输出 `\N`）。修复：两者一致输出 `\N`（NULL）；③ **`--deleted --count` 忽略 deleted 标志**：count 模式只统计活行。修复：`include_deleted = deleted or only_deleted`；④ **`decode_money` 用浮点除法**：int64 微元 `/100` 转 float，>2^53/100 微元时精度损失（实测 `9223372036854775807` 微元旧实现输出 `92233720368547760.00`）。修复：整数整除 + 补零。回归：PG12-18 × 16KB/32KB 14 套 + 金仓 V8R6C9B14 8/16/32KB 3 套全部"导出→同版本导入→三库逐值一致"闭环通过；`--list-db`/`--list-tables-db` 全 17 套名称解析 PASS；并行 CSV 与默认 CSV 逐字节一致；`--deleted --count`=活行+删除行（修复前漏删除行）。
 - **2026-09-22（CSV 转义双路径统一修复 + 全版本边界回归轮 v3.1）**：发现并行模式（`--parallel>1`）的 CSV 写入与默认路径转义规则不一致——缺 `\r`（回车）检测与字面 `\N` 特判，字段含单独回车会破坏 COPY 行结构、字面 `\N` 会被误判为 NULL。修复 main.py 1.22→1.23：`_write_row` 对齐 `heapfile.to_data()` 规则（含分隔符/换行/回车/引号或恰好为 `\N` 的字段一律双引号包裹、内部引号双写）。fixture 增至 4 行（新增 CSV 边界行：单独 `\r` 字段、字面 `\N`、空串 vs NULL、含逗号+引号+回车的数组元素、json 空字符串）→ PG12-18 × 16KB/32KB 14 套 + 金仓 8/16/32KB 3 套全部"导出→同版本导入→三库 38 列逐值一致"；并行 CSV 与默认 CSV 导入值逐行一致（`c_varchar='A\rB'` 回车无损、`c_text='\N'` 保留字面非 NULL）。该修复为纯输出逻辑，金仓与 PG 各版本通用。
 - **2026-09-22（PG12-18 非默认表空间全版本闭环轮 v3.0）**：PG12-18 × 16KB/32KB 共 14 套实例，`CREATE TABLESPACE pts LOCATION '<数据目录外路径>'`，38 列全类型表置于表空间（`pg_tblspc/{oid}` 符号链接指向 `PG_{ver}_.../{dboid}/{relfilenode}`），灌入 3 行（第 3 行含中英文特殊字符：单引号/双引号/反斜杠/换行/制表/回车/`%&$#@!?;--`/中文全角标点/emoji，jsonb/json 中文键值）→ 自动探测页大小 → SQL 与 CSV 双路径导出 → 导入**同版本**新库 → 38 列逐值一致。
 - **修复：enum label 版本感知（catalog.py 2.9→3.0、main.py 1.21→1.22）**：PG 的 `pg_enum.enumlabel` 是 name 定长 64B（NUL 右填充），金仓（V8R6C8B14/V8R6C8B20/V8R6C9B14/V9R1C10）是 varlena varchar（实测 V9 各库 sys_attribute 中 enumlabel attlen=-1）。此前统一按 varlena 提取，PG 的 name 首字节为奇数（如 `'sad'` 0x73）被误判为 1B 变长头而丢失首字符（实测导出 `'sad'` 变 `'ad'`）。修复后 `load_enum_map` 按 `is_kingbase` 分支选择布局与提取方式，PG 全版本 14 套表空间闭环三库逐值一致（含 enum `'sad'` 无损）。
