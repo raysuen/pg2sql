@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# version: 2.0
+# version: 2.1
+# Author: raysuen
 """
 pg2sql.toast
 TOAST 表解析与重组。

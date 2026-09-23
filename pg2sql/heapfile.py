@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# version: 2.4
+# version: 2.5
+# Author: raysuen
 """
 pg2sql.heapfile
 堆文件读取与导出引擎：遍历页面、提取元组、关联 TOAST、坏页容错。

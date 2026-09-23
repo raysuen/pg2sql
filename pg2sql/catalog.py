@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# version: 3.2
+# version: 3.3
+# Author: raysuen
 """
 pg2sql.catalog
 表结构元数据管理。

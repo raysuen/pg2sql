@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# version: 1.7
+# version: 1.8
+# Author: raysuen
 """
 pg2sql.page
 PostgreSQL 堆文件页面解析（支持任意 block size）。

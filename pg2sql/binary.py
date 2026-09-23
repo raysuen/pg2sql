@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# version: 2.2
+# version: 2.3
+# Author: raysuen
 """
 pg2sql.binary
 二进制基础工具：小端读取、varlena 解析（PG 真实磁盘格式）、TOAST 压缩解压。

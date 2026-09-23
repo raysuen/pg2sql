@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# version: 2.4
+# version: 2.5
+# Author: raysuen
 """
 pg2sql.types
 PostgreSQL 内置类型解码。将字段原始字节解码为可打印/可导入的 SQL 文本值。

@@ -2,7 +2,9 @@
 
 > 离线解析 PostgreSQL / 金仓数据库（KingbaseES）堆数据文件并导出为 SQL
 
-> README 版本：v3.6
+> Author: raysuen
+
+> README 版本：v3.7（2026-09-23 全部源码文件标注作者 raysuen；沿用 v3.6 帮助文档与 README 完善内容）
 
 ## 简介
 
@@ -300,6 +302,7 @@ SOFTWARE.
 
 ## 变更记录
 
+- **2026-09-23（作者标注轮 v3.7，全部文件版本 +0.1）**：包内全部源码文件（main.py 1.28→1.29、binary.py 2.2→2.3、catalog.py 3.2→3.3、heapfile.py 2.4→2.5、page.py 1.7→1.8、toast.py 2.0→2.1、tuple.py 1.5→1.6、types.py 2.4→2.5、__init__.py 1.2.0→1.3.0、export_meta.sql）标注 `Author: raysuen`。纯注释变更，无逻辑改动。
 - **2026-09-23（帮助文档与 README 完善轮，main.py 1.27→1.28）**：`--help` 描述更新——首行"解析 8KB 堆页面"改为"解析堆页面（8/16/32KB 自动探测）"，标题与结尾注明 PostgreSQL/KingbaseES 双兼容；示例区补充 `--fields`/`--header`/`--encoding`/`--page-size`/`--deleted`/`--only-deleted` 用法。README 修正 Block Size 实测矩阵表格结构（8/16/32KB × PG12-18 + 金仓完整呈现）、项目结构 page.py 注释更新为 8/16/32KB 自动探测。纯文档/帮助变更，无逻辑改动。
 - **2026-09-23（--header CSV 表头轮 v3.5，main.py 1.26→1.27、heapfile.py 2.3→2.4）**：新增 `--header` 参数——`--data` 导出 CSV 时首行输出字段名，与 PG/金仓 `COPY ... WITH (FORMAT csv, HEADER true)` 直接兼容；与 `--fields` 组合时表头只含选定列名，表头列名按 CSV 转义规则处理（含分隔符/引号时双引号包裹、引号双写）。串行（heapfile.to_data 新增 header 分支）与并行（main.py 在写出数据前预写表头行）两条路径一致。验证：PG16 CSV `COPY ... HEADER true` 导入 2 行 ✓；金仓 V8R6C9B14 8KB CSV `COPY ... HEADER true` 导入 4 行 ✓；PG12-18 × 16KB/32KB 14 套 + 金仓 8/16/32KB 3 套，带表头 CSV 与不带表头 CSV 数据部分逐字节一致、表头行正确。
 - **2026-09-23（--fields 指定字段导出轮 v3.4，main.py 1.25→1.26、heapfile.py 2.2→2.3、__init__.py 1.1.0→1.2.0）**：新增 `--fields COL1,COL2` 参数——SQL（INSERT 列名列表与值）与 CSV 均只输出指定列，未选列由目标表默认值/NULL 处理，字段名不存在时友好报错并列出可用字段。实现要点：字段过滤必须穿透 `dump_rows` 提取层（不能切片 values——TOAST 与 dropped 列占位会让索引错位），在 `to_sql`/`to_data` 输出层按 live_cols 索引过滤；**并行路径（`run_parallel` 绕过 `run()` 的校验块）补 `_normalize_fields` 规范化/校验，修复字段名子串误匹配 bug（`--fields c_text,c_jsonb` 误命中 `c_json`，并行 CSV 多出一列）**。验证：PG16 表空间表 SQL fields 导入 4 行 + CSV `COPY (列子集)` 导入 4 行（含中文特殊字符完整）；PG12-18 × 16KB/32KB 14 套 + 金仓 V8R6C9B14 8/16/32KB 3 套，fields CSV 与全列 CSV 对应列逐值一致；串行/并行 `--fields` 逐字节一致。

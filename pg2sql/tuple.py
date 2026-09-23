@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# version: 1.5
+# version: 1.6
+# Author: raysuen
 """
 pg2sql.tuple
 HeapTuple 解析：行头、NULL 位图、数据区。
