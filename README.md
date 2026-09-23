@@ -1,9 +1,8 @@
-
 # pg2sql
 
 > 离线解析 PostgreSQL / 金仓数据库（KingbaseES）堆数据文件并导出为 SQL
 
-> README 版本：v3.3（2026-09-22 库编码自动探测与字节可逆解码轮：金仓 V9 MySQL 0x9B 导入报错修复 + 全版本回归）
+> README 版本：v3.6
 
 ## 简介
 
@@ -21,15 +20,13 @@ pg2sql 是一个纯 Python 编写的数据库数据文件解析工具，**无需
 
 **Block Size（页大小自动探测，实测矩阵）**
 
-| 版本 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 金仓 V8R6C9B14 |
+| Block Size | PG12 | PG13 | PG14 | PG15 | PG16 | PG17 | PG18 | 金仓 V8R6C9B14 |
 |---|---|---|---|---|---|---|---|---|
+| 8KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 16KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 32KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-|---|---|---|---|---|---|---|---|
-| 16KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 32KB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-PG12-18 全部 14 套（7 版本 × 16KB/32KB）+ 金仓 V8R6C9B14 的 8/16/32KB 三套均为：38 列全类型边界表（枚举/数组含 NULL 元素/jsonb 嵌套/inet/macaddr8/几何/±infinity/NaN/含引号换行文本等）→ 导出（自动探测页大小）→ 导入 8KB 实例 → count 与 38 列逐值一致。8KB 全版本（PG12-18）此前已闭环。
+PG12-18 全部 14 套（7 版本 × 16KB/32KB）+ 金仓 V8R6C9B14 的 8/16/32KB 三套均为：38 列全类型边界表（枚举/数组含 NULL 元素/jsonb 嵌套/inet/macaddr8/几何/±infinity/NaN/含引号换行文本等）→ 导出（自动探测页大小）→ 导入同版本实例 → count 与 38 列逐值一致。8KB 全版本（PG12-18）此前已闭环。
 
 页大小探测逻辑：读取页头 `pd_pagesize_version`（`size \| version`，`PageGetPageSize = psv & 0xFF00`），在候选集合 {8192, 16384, 32768} 中按 `lower<=upper<=special<=size` 指针链校验后确定，系统目录与 TOAST 文件同链路自动探测，无需 `--page-size` 参数。
 
@@ -105,6 +102,8 @@ python3 main.py -h    # 查看完整帮助
 | `--ddl` | 输出 CREATE TABLE DDL |
 | `--sql` | 输出 INSERT 语句 |
 | `--data` | 输出 CSV 格式（可用 LOAD DATA 导入） |
+| `--fields COL1,COL2` | 只导出指定字段（逗号分隔，SQL/CSV 均生效；未选列由目标表默认值/NULL 处理） |
+| `--header` | CSV 首行输出字段名（配合 --data，与 COPY ... WITH (FORMAT csv, HEADER true) 兼容） |
 | `--deleted` | 输出已删除和未删除的行 |
 | `--only-deleted` | 只输出已删除的行（不含未删除行） |
 | `--count` | 仅统计行数 |
@@ -185,6 +184,26 @@ python3 main.py data_file --catalog-json meta.json --sql --only-deleted
 # 8 进程并发解析大文件
 python3 main.py big_file --catalog-json meta.json --sql --parallel 8
 
+# 导出全部字段（默认行为：不指定 --fields 即导出所有未删除列）
+python3 main.py data_file --catalog-json meta.json --sql
+python3 main.py data_file --catalog-json meta.json --data -o all_cols.csv
+
+# 只导出指定字段（SQL：INSERT 只含这些列，未选列由目标表默认值/NULL 处理）
+python3 main.py data_file --catalog-json meta.json --sql --fields id,name,remark
+
+# 只导出指定字段（CSV：每行只含这些列值，配合 COPY (列名) 列子集导入）
+python3 main.py data_file --catalog-json meta.json --data --fields id,name --delimiter ',' -o out.csv
+# 导入（PG/金仓）：COPY tbl (id, name) FROM 'out.csv' WITH (FORMAT csv, NULL E'\\N');
+
+# 只导出指定字段 + 并发（并行与串行结果逐字节一致）
+python3 main.py big_file --catalog-json meta.json --data --fields id,name --parallel 8
+
+# CSV 首行输出字段名（--header；与 --fields 组合时表头只含选定列名）
+python3 main.py data_file --catalog-json meta.json --data --header -o out_header.csv
+# 导入（PG/金仓）：COPY tbl FROM 'out_header.csv' WITH (FORMAT csv, HEADER true, NULL E'\\N');
+python3 main.py data_file --catalog-json meta.json --data --fields id,name --header -o out_h2.csv
+# 导入列子集：COPY tbl (id, name) FROM 'out_h2.csv' WITH (FORMAT csv, HEADER true, NULL E'\\N');
+
 # 关联 TOAST 表
 python3 main.py data_file --catalog-json meta.json --sql --toast /path/to/toast_file
 
@@ -214,7 +233,7 @@ pg2sql/
 └── pg2sql/              # 核心代码包
     ├── __init__.py      # 包初始化（__version__）
     ├── binary.py        # 二进制读取工具 + varlena 解析
-    ├── page.py          # 8KB 堆页面解析（支持 version 4/5 + 自动探测）
+    ├── page.py          # 堆页面解析（支持 version 4/5 + 8/16/32KB 自动探测）
     ├── tuple.py         # HeapTuple 解析（可见性判定 + NULL 位图）
     ├── types.py         # 40+ 内置类型解码器（含枚举/interval/float 特殊值）
     ├── catalog.py       # 表结构元数据（自动发现 + 数据区扫描 + 版本感知布局）
@@ -281,6 +300,9 @@ SOFTWARE.
 
 ## 变更记录
 
+- **2026-09-23（帮助文档与 README 完善轮，main.py 1.27→1.28）**：`--help` 描述更新——首行"解析 8KB 堆页面"改为"解析堆页面（8/16/32KB 自动探测）"，标题与结尾注明 PostgreSQL/KingbaseES 双兼容；示例区补充 `--fields`/`--header`/`--encoding`/`--page-size`/`--deleted`/`--only-deleted` 用法。README 修正 Block Size 实测矩阵表格结构（8/16/32KB × PG12-18 + 金仓完整呈现）、项目结构 page.py 注释更新为 8/16/32KB 自动探测。纯文档/帮助变更，无逻辑改动。
+- **2026-09-23（--header CSV 表头轮 v3.5，main.py 1.26→1.27、heapfile.py 2.3→2.4）**：新增 `--header` 参数——`--data` 导出 CSV 时首行输出字段名，与 PG/金仓 `COPY ... WITH (FORMAT csv, HEADER true)` 直接兼容；与 `--fields` 组合时表头只含选定列名，表头列名按 CSV 转义规则处理（含分隔符/引号时双引号包裹、引号双写）。串行（heapfile.to_data 新增 header 分支）与并行（main.py 在写出数据前预写表头行）两条路径一致。验证：PG16 CSV `COPY ... HEADER true` 导入 2 行 ✓；金仓 V8R6C9B14 8KB CSV `COPY ... HEADER true` 导入 4 行 ✓；PG12-18 × 16KB/32KB 14 套 + 金仓 8/16/32KB 3 套，带表头 CSV 与不带表头 CSV 数据部分逐字节一致、表头行正确。
+- **2026-09-23（--fields 指定字段导出轮 v3.4，main.py 1.25→1.26、heapfile.py 2.2→2.3、__init__.py 1.1.0→1.2.0）**：新增 `--fields COL1,COL2` 参数——SQL（INSERT 列名列表与值）与 CSV 均只输出指定列，未选列由目标表默认值/NULL 处理，字段名不存在时友好报错并列出可用字段。实现要点：字段过滤必须穿透 `dump_rows` 提取层（不能切片 values——TOAST 与 dropped 列占位会让索引错位），在 `to_sql`/`to_data` 输出层按 live_cols 索引过滤；**并行路径（`run_parallel` 绕过 `run()` 的校验块）补 `_normalize_fields` 规范化/校验，修复字段名子串误匹配 bug（`--fields c_text,c_jsonb` 误命中 `c_json`，并行 CSV 多出一列）**。验证：PG16 表空间表 SQL fields 导入 4 行 + CSV `COPY (列子集)` 导入 4 行（含中文特殊字符完整）；PG12-18 × 16KB/32KB 14 套 + 金仓 V8R6C9B14 8/16/32KB 3 套，fields CSV 与全列 CSV 对应列逐值一致；串行/并行 `--fields` 逐字节一致。
 - **2026-09-22（库编码自动探测与字节可逆解码轮 v3.3，main.py 1.24→1.25、binary.py 2.1→2.2、types.py 2.3→2.4、catalog.py 3.0→3.2）**：金仓 V9 MySQL 模式 50 列大表（`ray.test_50col_old`，TOAST 61,361 页）导出 SQL 导入报 `ERROR: invalid byte sequence for encoding "UTF8": 0x9b`。根因：**非 UTF-8 源库文本一律按 utf-8/replace 输出**——LATIN1 库 0x9B 等字节被替换为 U+FFFD（数据损坏），且旧版部分路径写入裸字节导致导入非法。修复：① catalog.py 新增 `detect_database_encoding()`——从 `global/1262` 解析 pg_database 元组按库 OID 探测 `datencoding`，ID→codec 映射表按 **PG12-18 各版本源码 `pg_wchar.h` 的 `pg_enc` 权威枚举逐一核对**（UTF8=6、LATIN1=8、GB18030=40、GBK=38…，7 个版本完全一致）；② 新增 `--encoding CODEC` 命令行覆盖；③ binary.py `decode_bytes`/`cstring` 按库编码解码，strict 解码失败时**逐字节 latin-1 兜底**（0x9B→U+009B→UTF-8 `C2 9B`，导出文件恒为合法 UTF-8 且字节无损可逆）。调试实证修正本轮的 4B 偏移：1262 元组 encoding 字段在 `t_hoff+76`，原 layout 用 2 元组 `(64,'c')` 被 `_extract_fields_direct` 误判为 varlena 列导致错位，已按 3 元组 `(attlen, is_varlena, attalign)` 修正。验证：PG16 LATIN1 库 `0x9B 0x81 0x9B`→导出→导入 UTF8 库字节一致（`C2 9B` 无损）；**金仓 V9 MySQL 用户报错库**（base/24576/41008，50 列，2,591,126 个 TOAST valueid）自动探测 utf-8→导出 SQL 全 UTF-8 合法（原 10955 行 0x9B 消除）；PG12-18 × 16KB/32KB 14 套 + 金仓 V8R6C9B14 8/16/32KB 3 套"导出→同版本导入→逐值一致"闭环全 PASS、`--list-tables` 14 套 PASS、并行 CSV 与串行 CSV 逐字节一致。
 - **2026-09-22（代码审核轮 v3.2，main.py 1.23→1.24、types.py 2.2→2.3）**：全量通读 9 个源码文件后修复 4 处健壮性/逻辑问题——① **`--list-db`/`--list-tables-db` 辅助命令硬编码 8192 页大小**：16KB/32KB 实例上 `_is_pg_class_content`/`_is_pg_database_content`/`_parse_pg_database`/`_parse_pg_class`/`_parse_pg_class_raw_scan` 用固定 8192 读页，Page 长度校验失败导致数据库名/表名解析为空（仅显示 OID）。修复：上述路径全部改为 `_probe_file_page_size()` 页大小自动探测；② **并行 CSV 路径 `_write_row` 缺 `__TOAST_MISSING__` 特判**：与单进程 `heapfile.to_data()` 不一致（TOAST chunk 缺失时并行输出字面字符串、单进程输出 `\N`）。修复：两者一致输出 `\N`（NULL）；③ **`--deleted --count` 忽略 deleted 标志**：count 模式只统计活行。修复：`include_deleted = deleted or only_deleted`；④ **`decode_money` 用浮点除法**：int64 微元 `/100` 转 float，>2^53/100 微元时精度损失（实测 `9223372036854775807` 微元旧实现输出 `92233720368547760.00`）。修复：整数整除 + 补零。回归：PG12-18 × 16KB/32KB 14 套 + 金仓 V8R6C9B14 8/16/32KB 3 套全部"导出→同版本导入→三库逐值一致"闭环通过；`--list-db`/`--list-tables-db` 全 17 套名称解析 PASS；并行 CSV 与默认 CSV 逐字节一致；`--deleted --count`=活行+删除行（修复前漏删除行）。
 - **2026-09-22（CSV 转义双路径统一修复 + 全版本边界回归轮 v3.1）**：发现并行模式（`--parallel>1`）的 CSV 写入与默认路径转义规则不一致——缺 `\r`（回车）检测与字面 `\N` 特判，字段含单独回车会破坏 COPY 行结构、字面 `\N` 会被误判为 NULL。修复 main.py 1.22→1.23：`_write_row` 对齐 `heapfile.to_data()` 规则（含分隔符/换行/回车/引号或恰好为 `\N` 的字段一律双引号包裹、内部引号双写）。fixture 增至 4 行（新增 CSV 边界行：单独 `\r` 字段、字面 `\N`、空串 vs NULL、含逗号+引号+回车的数组元素、json 空字符串）→ PG12-18 × 16KB/32KB 14 套 + 金仓 8/16/32KB 3 套全部"导出→同版本导入→三库 38 列逐值一致"；并行 CSV 与默认 CSV 导入值逐行一致（`c_varchar='A\rB'` 回车无损、`c_text='\N'` 保留字面非 NULL）。该修复为纯输出逻辑，金仓与 PG 各版本通用。

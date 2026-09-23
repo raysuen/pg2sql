@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# version: 1.25
+# version: 1.28
 """
 pg2sql - 离线解析 PostgreSQL 堆数据文件并导出为 SQL
 用法: python3 main.py <data_file> [options]
@@ -84,7 +84,23 @@ EPILOG = """
   # 从数据目录离线解析元数据 (无需 JSON)
   python3 main.py /var/lib/pg/data/base/16384/16387 --datadir /var/lib/pg/data --db-oid 16384 --sql --ddl
 
-更多详情: pg2sql - PostgreSQL 堆数据文件离线解析工具
+  # 只导出指定字段 (SQL/CSV 均生效)
+  python3 main.py data_file --datadir /var/lib/pg/data --db-oid 16384 --sql --fields id,name,remark
+
+  # CSV 首行输出字段名 (配合 COPY ... WITH (FORMAT csv, HEADER true) 导入)
+  python3 main.py data_file --datadir /var/lib/pg/data --db-oid 16384 --data --header -o out.csv
+
+  # 非 UTF-8 源库指定编码 (LATIN1/GB18030/GBK/SQL_ASCII 等, 默认自动探测)
+  python3 main.py data_file --datadir /var/lib/pg/data --db-oid 16384 --sql --encoding gbk
+
+  # 显式指定页面大小 (默认自动探测 8/16/32KB)
+  python3 main.py data_file --datadir /var/lib/pg/data --db-oid 16384 --data --page-size 32768
+
+  # 恢复已删除的行 (t_xmax 已设置但未被 vacuum)
+  python3 main.py data_file --datadir /var/lib/pg/data --db-oid 16384 --sql --deleted
+  python3 main.py data_file --datadir /var/lib/pg/data --db-oid 16384 --sql --only-deleted
+
+更多详情: pg2sql - 离线解析 PostgreSQL/KingbaseES 堆数据文件工具
 """
 
 
@@ -93,10 +109,10 @@ def build_parser():
         prog="pg2sql",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "pg2sql v%s - 离线解析 PostgreSQL 堆数据文件并导出为 SQL\n"
+            "pg2sql v%s - 离线解析 PostgreSQL/KingbaseES 堆数据文件并导出为 SQL\n"
             "\n"
-            "无需 PostgreSQL 实例运行，直接读取数据文件(base/{db_oid}/{table_oid})，\n"
-            "解析 8KB 堆页面中的 HeapTuple，输出 DDL 和 INSERT 语句。\n"
+            "无需实例运行，直接读取数据文件(base/{db_oid}/{table_oid})，\n"
+            "解析堆页面（8/16/32KB 自动探测）中的 HeapTuple，输出 DDL 和 INSERT 语句。\n"
             "支持自动发现表结构（无需 --catalog-json）、恢复已删除行、\n"
             "TOAST 大字段重组、坏页容错、并发解析。\n"
             "\n"
@@ -158,6 +174,10 @@ def build_parser():
                            help="输出到文件或目录 (目录则自动命名 schema.table.type)")
     opt_group.add_argument("--limit", type=int, default=0, metavar="N",
                            help="限制输出行数 (0=不限制)")
+    opt_group.add_argument("--fields", default=None, metavar="COL1,COL2",
+                           help="只导出指定字段 (逗号分隔, 如 --fields id,name; 默认全部)")
+    opt_group.add_argument("--header", action="store_true", default=False,
+                           help="CSV 首行输出字段名 (配合 --data, 与 COPY HEADER true 兼容)")
     opt_group.add_argument("--complete-insert", action="store_true", default=True,
                            help="INSERT 语句包含字段名 (默认开启)")
     opt_group.add_argument("--no-complete-insert", action="store_false", dest="complete_insert",
@@ -448,6 +468,23 @@ def _auto_detect_toast(args, hf, table_meta):
             log(f"加载 TOAST 表 {toast_path} 失败: {e}")
 
 
+def _normalize_fields(args, table_meta):
+    """规范化并校验 --fields（v1.26）：字符串→字段名列表，校验存在性。
+
+    串行 (run) 与并行 (run_parallel) 两条路径都必须调用——并行入口
+    直接走 run_parallel，不经过 run()，若不在此规范化会导致字段名
+    子串误匹配（'c_json' 命中 'c_jsonb'）。
+    """
+    if args.fields:
+        if isinstance(args.fields, str):
+            args.fields = [f.strip() for f in args.fields.split(",") if f.strip()]
+        valid = {c.name for c in table_meta.columns if not c.attdropped}
+        missing = [f for f in args.fields if f not in valid]
+        if missing:
+            error_exit(f"--fields 中不存在的字段: {', '.join(missing)}\n"
+                       f"可用字段: {', '.join(sorted(valid))}")
+
+
 def run(args):
     # --- 加载元数据 ---
     meta = load_metadata(args)
@@ -476,6 +513,9 @@ def run(args):
         error_exit(f"数据文件不存在: {args.datafile}")
 
     table_meta = select_table(meta, args)
+
+    # --- --fields 字段名校验 (v1.26) ---
+    _normalize_fields(args, table_meta)
 
     # --- 创建 HeapFile（P2-1: 带 PG 主版本，NULL 位图语义随版本；金仓布局差异穿透）---
     hf = HeapFile(args.datafile, page_size=args.page_size,
@@ -554,7 +594,8 @@ def run(args):
         for line in hf.to_data(table_meta, include_deleted=include_deleted,
                                only_deleted=only_deleted,
                                limit=args.limit, delimiter=args.delimiter,
-                               force=args.force):
+                               force=args.force, fields=args.fields,
+                               header=args.header):
             fp.write(line + "\n")
             n_written += 1
             if n_written % FLUSH_INTERVAL == 0:
@@ -568,7 +609,8 @@ def run(args):
         for stmt in hf.to_sql(table_meta, include_deleted=include_deleted,
                               only_deleted=only_deleted,
                               limit=args.limit, complete_insert=args.complete_insert,
-                              replace=args.replace, force=args.force):
+                              replace=args.replace, force=args.force,
+                              fields=args.fields):
             fp.write(stmt + "\n")
             n_written += 1
             if n_written % FLUSH_INTERVAL == 0:
@@ -782,6 +824,9 @@ def run_parallel(args, meta, table_meta):
     """
     import time as _time
 
+    # v1.26: 并行入口与串行共享 --fields 规范化/校验（绕过 run() 时必须显式调用）
+    _normalize_fields(args, table_meta)
+
     page_size = args.page_size or _probe_file_page_size(args.datafile)
     file_size = os.path.getsize(args.datafile)
     npages = file_size // page_size
@@ -841,10 +886,23 @@ def run_parallel(args, meta, table_meta):
 
     # 预生成 SQL 模板（避免每行重复构建）
     live_cols = [c for c in table_meta.columns if not c.attdropped]
-    col_names = [c.name for c in live_cols]
+    # v1.26: --fields 只输出指定列（out_idx 对齐 live_cols；worker 返回全列 values，
+    #         _write_row 按 out_idx 过滤后再写出）
+    if args.fields:
+        out_idx = [i for i, c in enumerate(live_cols) if c.name in args.fields]
+    else:
+        out_idx = list(range(len(live_cols)))
+    col_names = [live_cols[i].name for i in out_idx]
     col_str = f"({', '.join(chr(34)+c+chr(34) for c in col_names)})" if args.complete_insert else ""
     target = f'"{table_meta.schema}"."{table_meta.relname}"'
     verb = "REPLACE INTO" if args.replace else "INSERT INTO"
+
+    # v1.27: --header CSV 首行输出字段名（与 COPY HEADER true 兼容；--fields 时只输出选定列名）
+    if args.header and args.data:
+        hdr = args.delimiter.join(
+            '"' + c.replace('"', '""') + '"' if (args.delimiter in c or '"' in c) else c
+            for c in col_names)
+        out_fp.write(hdr + "\n")
 
     FLUSH_INTERVAL = 1000  # 每写 1000 行 flush 一次
     total = 0
@@ -853,9 +911,10 @@ def run_parallel(args, meta, table_meta):
     def _write_row(values, is_deleted=False):
         """写一行（CSV 或 INSERT），返回是否达到 --limit。"""
         nonlocal total
+        vals = [values[i] for i in out_idx]
         if args.data:
             parts = []
-            for v in values:
+            for v in vals:
                 # v1.24: __TOAST_MISSING__ 与单进程 to_data 一致输出 \N（NULL）
                 if v is None or v == "__TOAST_MISSING__":
                     parts.append("\\N")
@@ -872,7 +931,7 @@ def run_parallel(args, meta, table_meta):
             out_fp.write(args.delimiter.join(parts) + "\n")
         else:
             sql_vals = []
-            for i, v in enumerate(values):
+            for i, v in enumerate(vals):
                 if v is None:
                     sql_vals.append("NULL")
                 elif v == "__TOAST_MISSING__":
@@ -880,7 +939,7 @@ def run_parallel(args, meta, table_meta):
                 else:
                     # 注意: values 只含未 dropped 列（_decode_fields 已跳过），
                     # 索引必须对齐 live_cols，不能直接用 table_meta.columns
-                    col = live_cols[i] if i < len(live_cols) else None
+                    col = live_cols[out_idx[i]] if i < len(out_idx) else None
                     # 数字类型不加引号（xid/cid 除外：PG 无 int→xid 隐式转换，需文本输入）
                     if col is not None and col.atttypid in (16, 20, 21, 23, 26, 700, 701, 1700):
                         sv = str(v)

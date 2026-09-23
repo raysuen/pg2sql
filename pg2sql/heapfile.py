@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# version: 2.2
+# version: 2.4
 """
 pg2sql.heapfile
 堆文件读取与导出引擎：遍历页面、提取元组、关联 TOAST、坏页容错。
@@ -524,18 +524,26 @@ class HeapFile:
     # ------------------------------------------------------------------
 
     def to_sql(self, table_meta, include_deleted=False, only_deleted=False, limit=0,
-               complete_insert=True, replace=False, force=False):
-        """生成 INSERT/REPLACE 语句。"""
+               complete_insert=True, replace=False, force=False, fields=None):
+        """生成 INSERT/REPLACE 语句。
+
+        fields: 可选的字段名列表——只输出指定列（INSERT 省略未选列，
+        由目标表默认值/约束处理）；None 表示全部未删除列。
+        """
         verb = "REPLACE INTO" if replace else "INSERT INTO"
         live_cols = [c for c in table_meta.columns if not c.attdropped]
-        col_names = [c.name for c in live_cols]
+        if fields:
+            out_idx = [i for i, c in enumerate(live_cols) if c.name in fields]
+        else:
+            out_idx = list(range(len(live_cols)))
+        col_names = [live_cols[i].name for i in out_idx]
         col_str = f"({', '.join(self._quote(c) for c in col_names)})" if complete_insert else ""
         target = f'"{table_meta.schema}"."{table_meta.relname}"'
         for row in self.dump_rows(table_meta, include_deleted, only_deleted, limit, force):
-            vals = row["values"]
+            vals = [row["values"][i] for i in out_idx]
             sql_vals = []
             for i, v in enumerate(vals):
-                col = live_cols[i] if i < len(live_cols) else None
+                col = live_cols[out_idx[i]] if i < len(out_idx) else None
                 if v is None:
                     sql_vals.append("NULL")
                 elif v == "__TOAST_MISSING__":
@@ -548,7 +556,7 @@ class HeapFile:
             yield stmt
 
     def to_data(self, table_meta, include_deleted=False, only_deleted=False, limit=0,
-                delimiter=",", force=False):
+                delimiter=",", force=False, fields=None, header=False):
         """生成 COPY CSV 格式数据行（与 PG COPY ... WITH (FORMAT csv, NULL '\\N') 兼容）。
 
         转义规则（PG COPY csv）：
@@ -556,20 +564,31 @@ class HeapFile:
           - 值中的反斜杠/tab/换行原样保留（csv 无反斜杠转义）
           - 含分隔符/换行/引号的字段用双引号包裹，内部引号双写
           - 字面量恰好为 "\\N" 时也包裹，避免被误判为 NULL
+
+        fields: 可选的字段名列表——只输出指定列；None 表示全部未删除列。
+        header: True 时首行输出列名（与 COPY ... WITH (FORMAT csv, HEADER true) 兼容）。
         """
+        live_cols = [c for c in table_meta.columns if not c.attdropped]
+        if fields:
+            out_idx = [i for i, c in enumerate(live_cols) if c.name in fields]
+        else:
+            out_idx = list(range(len(live_cols)))
+
+        def _csv_field(raw):
+            needs_quote = (delimiter in raw or "\n" in raw or "\r" in raw
+                           or '"' in raw or raw == "\\N")
+            return '"' + raw.replace('"', '""') + '"' if needs_quote else raw
+
+        if header:
+            yield delimiter.join(_csv_field(live_cols[i].name) for i in out_idx)
         for row in self.dump_rows(table_meta, include_deleted, only_deleted, limit, force):
             parts = []
-            for v in row["values"]:
+            for i in out_idx:
+                v = row["values"][i]
                 if v is None or v == "__TOAST_MISSING__":
                     parts.append("\\N")
                 else:
-                    raw = str(v)
-                    needs_quote = (delimiter in raw or "\n" in raw or "\r" in raw
-                                   or '"' in raw or raw == "\\N")
-                    if needs_quote:
-                        parts.append('"' + raw.replace('"', '""') + '"')
-                    else:
-                        parts.append(raw)
+                    parts.append(_csv_field(str(v)))
             yield delimiter.join(parts)
 
     # ------------------------------------------------------------------
